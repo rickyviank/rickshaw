@@ -28,6 +28,13 @@ def _build_provider(name: str, cfg: RickshawConfig) -> LLMProvider:
             api_key=cfg.devin_api_key,
             base_url=cfg.devin_base_url,
         )
+    if name == "anthropic":
+        return get_provider(
+            name,
+            api_key=cfg.anthropic_api_key,
+            base_url=cfg.anthropic_base_url,
+            model=cfg.anthropic_model,
+        )
     return get_provider(name)
 
 
@@ -39,7 +46,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--provider",
         default=None,
-        help="Provider name (e.g. openai, devin). Overrides config/env.",
+        help="Provider name (e.g. openai, devin, anthropic). Overrides config/env.",
     )
     parser.add_argument(
         "--effort",

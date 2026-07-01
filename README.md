@@ -28,7 +28,7 @@ cp .env.example .env
 
 | Variable | Required | Description |
 |---|---|---|
-| `RICKSHAW_PROVIDER` | No | Default provider (`openai` or `devin`). Defaults to `openai`. |
+| `RICKSHAW_PROVIDER` | No | Default provider (`openai`, `devin`, or `anthropic`). Defaults to `openai`. |
 | `RICKSHAW_EFFORT` | No | Default effort level: `low`, `medium`, `high`. Defaults to `medium`. |
 | `OPENAI_API_KEY` | For OpenAI | OpenAI API key. |
 | `OPENAI_BASE_URL` | No | Override the OpenAI API base URL. |
@@ -36,6 +36,9 @@ cp .env.example .env
 | `OPENAI_EMBEDDING_MODEL` | No | Embedding model (default: `text-embedding-3-small`). |
 | `DEVIN_API_KEY` | For Devin | Devin API key. |
 | `DEVIN_BASE_URL` | No | Override the Devin API base URL. |
+| `ANTHROPIC_API_KEY` | For Anthropic | Anthropic API key. |
+| `ANTHROPIC_BASE_URL` | No | Override the Anthropic API base URL (default: `https://api.anthropic.com`). |
+| `ANTHROPIC_MODEL` | No | Claude model to use (default: `claude-3-5-sonnet-latest`). |
 | `RICKSHAW_EMBEDDING_PROVIDER` | No | Separate embedding provider (e.g. `openai`) independent of the chat provider. |
 
 You may also supply values in a `config.yaml` file in the working directory.
@@ -44,6 +47,7 @@ You may also supply values in a `config.yaml` file in the working directory.
 
 - **openai** — OpenAI chat completions and embeddings APIs.
 - **devin** — Devin coding agent API (skeleton; fill in TODOs from Devin API docs).
+- **anthropic** — Anthropic Claude Messages API (chat + tool-calling; no embeddings).
 
 Adding a new provider: subclass `rickshaw.providers.base.LLMProvider`, implement the abstract methods, and register it:
 

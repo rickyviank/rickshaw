@@ -14,11 +14,13 @@ def _ensure_builtins() -> None:
     if _REGISTRY:
         return
 
+    from rickshaw.providers.anthropic_provider import AnthropicProvider
     from rickshaw.providers.devin_provider import DevinProvider
     from rickshaw.providers.openai_provider import OpenAIProvider
 
     register("openai", OpenAIProvider)
     register("devin", DevinProvider)
+    register("anthropic", AnthropicProvider)
 
 
 def register(name: str, cls: type[LLMProvider]) -> None:

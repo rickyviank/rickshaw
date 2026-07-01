@@ -41,6 +41,11 @@ class RickshawConfig:
     devin_api_key: str = ""
     devin_base_url: str = "https://api.devin.ai"
 
+    # Anthropic-specific
+    anthropic_api_key: str = ""
+    anthropic_base_url: str = "https://api.anthropic.com"
+    anthropic_model: str = "claude-3-5-sonnet-latest"
+
     # Separate embedding provider (may differ from the chat provider)
     embedding_provider: str = ""
 
@@ -95,10 +100,13 @@ def load_config(
         ),
         devin_api_key=_get("DEVIN_API_KEY"),
         devin_base_url=_get("DEVIN_BASE_URL", "https://api.devin.ai"),
+        anthropic_api_key=_get("ANTHROPIC_API_KEY"),
+        anthropic_base_url=_get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+        anthropic_model=_get("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest"),
         embedding_provider=_get("RICKSHAW_EMBEDDING_PROVIDER"),
         extra={
             k: v
             for k, v in file_values.items()
-            if not k.startswith(("RICKSHAW_", "OPENAI_", "DEVIN_"))
+            if not k.startswith(("RICKSHAW_", "OPENAI_", "DEVIN_", "ANTHROPIC_"))
         },
     )

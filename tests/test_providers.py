@@ -9,6 +9,7 @@ import respx
 from rickshaw.providers.base import Effort, Message, Response, ToolCall, ToolSpec
 from rickshaw.providers.openai_provider import OpenAIProvider
 from rickshaw.providers.devin_provider import DevinProvider
+from rickshaw.providers.anthropic_provider import AnthropicProvider
 
 
 # ---------------------------------------------------------------------------
@@ -486,3 +487,218 @@ def test_devin_accepts_all_effort_levels_without_error():
     for effort in Effort:
         response = provider.complete(messages, effort=effort)
         assert response.text == "Hello from Devin!"
+
+
+# ---------------------------------------------------------------------------
+# Anthropic provider
+# ---------------------------------------------------------------------------
+
+ANTHROPIC_MESSAGES_RESPONSE = {
+    "id": "msg_test",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-3-5-sonnet-latest",
+    "content": [{"type": "text", "text": "Hello from Claude!"}],
+    "usage": {"input_tokens": 12, "output_tokens": 6},
+}
+
+ANTHROPIC_TOOL_USE_RESPONSE = {
+    "id": "msg_tool",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-3-5-sonnet-latest",
+    "content": [
+        {"type": "text", "text": "Let me remember that."},
+        {
+            "type": "tool_use",
+            "id": "toolu_abc123",
+            "name": "remember",
+            "input": {"fact": "user prefers dark mode"},
+        },
+    ],
+    "usage": {"input_tokens": 20, "output_tokens": 10},
+}
+
+
+@respx.mock
+def test_anthropic_complete_returns_normalized_response():
+    respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json=ANTHROPIC_MESSAGES_RESPONSE)
+    )
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    messages = [Message(role="user", content="Hi")]
+    response = provider.complete(messages, effort=Effort.MEDIUM)
+
+    assert isinstance(response, Response)
+    assert response.text == "Hello from Claude!"
+    assert response.model == "claude-3-5-sonnet-latest"
+    assert response.usage.prompt_tokens == 12
+    assert response.usage.completion_tokens == 6
+    assert response.usage.total_tokens == 18
+    assert response.effort == Effort.MEDIUM
+
+
+@respx.mock
+def test_anthropic_sends_auth_and_version_headers():
+    """Anthropic uses x-api-key and anthropic-version, not Authorization."""
+    route = respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json=ANTHROPIC_MESSAGES_RESPONSE)
+    )
+    provider = AnthropicProvider(api_key="my-secret-key")
+    provider.complete([Message(role="user", content="Hi")])
+
+    headers = route.calls[0].request.headers
+    assert headers["x-api-key"] == "my-secret-key"
+    assert headers["anthropic-version"] == "2023-06-01"
+    assert "authorization" not in headers
+
+
+@respx.mock
+def test_anthropic_hoists_system_message():
+    """System messages are hoisted into the top-level system field."""
+    route = respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json=ANTHROPIC_MESSAGES_RESPONSE)
+    )
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    messages = [
+        Message(role="system", content="You are helpful."),
+        Message(role="user", content="Hello"),
+    ]
+    provider.complete(messages)
+
+    sent = json.loads(route.calls[0].request.content)
+    assert sent["system"] == "You are helpful."
+    assert sent["messages"] == [{"role": "user", "content": "Hello"}]
+    assert sent["max_tokens"] > 0
+
+
+@respx.mock
+def test_anthropic_complete_with_tool_use():
+    """tool_use blocks are parsed into normalized ToolCall objects."""
+    respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json=ANTHROPIC_TOOL_USE_RESPONSE)
+    )
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    tools = [
+        ToolSpec(
+            name="remember",
+            description="Store a fact",
+            parameters={"type": "object", "properties": {"fact": {"type": "string"}}},
+        )
+    ]
+    messages = [Message(role="user", content="Remember that I like dark mode")]
+    response = provider.complete(messages, tools=tools)
+
+    assert response.text == "Let me remember that."
+    assert len(response.tool_calls) == 1
+    tc = response.tool_calls[0]
+    assert isinstance(tc, ToolCall)
+    assert tc.id == "toolu_abc123"
+    assert tc.name == "remember"
+    assert tc.arguments == {"fact": "user prefers dark mode"}
+    assert tc.raw["type"] == "tool_use"
+
+
+def test_anthropic_parse_tool_calls_directly():
+    """_parse_tool_calls converts tool_use blocks; text blocks are skipped."""
+    blocks = [
+        {"type": "text", "text": "thinking..."},
+        {
+            "type": "tool_use",
+            "id": "toolu_xyz",
+            "name": "recall",
+            "input": {"query": "dark mode"},
+        },
+    ]
+    parsed = AnthropicProvider._parse_tool_calls(blocks)
+    assert len(parsed) == 1
+    assert isinstance(parsed[0], ToolCall)
+    assert parsed[0].id == "toolu_xyz"
+    assert parsed[0].name == "recall"
+    assert parsed[0].arguments == {"query": "dark mode"}
+
+
+@respx.mock
+def test_anthropic_forwards_tools_in_payload():
+    """Tools are forwarded in Anthropic's {name, description, input_schema} shape."""
+    route = respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json=ANTHROPIC_MESSAGES_RESPONSE)
+    )
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+    tools = [ToolSpec(name="recall", description="Recall memories", parameters=schema)]
+    provider.complete([Message(role="user", content="hi")], tools=tools)
+
+    sent = json.loads(route.calls[0].request.content)
+    assert sent["tools"][0] == {
+        "name": "recall",
+        "description": "Recall memories",
+        "input_schema": schema,
+    }
+
+
+@respx.mock
+def test_anthropic_maps_tool_choice_required_to_any():
+    """OpenAI-style 'required' maps to Anthropic's {'type': 'any'}."""
+    route = respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json=ANTHROPIC_MESSAGES_RESPONSE)
+    )
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    tools = [
+        ToolSpec(
+            name="recall",
+            description="Recall memories",
+            parameters={"type": "object", "properties": {}},
+        )
+    ]
+    provider.complete(
+        [Message(role="user", content="hi")], tools=tools, tool_choice="required"
+    )
+    sent = json.loads(route.calls[0].request.content)
+    assert sent["tool_choice"] == {"type": "any"}
+
+
+@respx.mock
+def test_anthropic_omits_tool_choice_without_tools():
+    """tool_choice and tools are not sent when no tools are advertised."""
+    route = respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json=ANTHROPIC_MESSAGES_RESPONSE)
+    )
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    provider.complete([Message(role="user", content="hi")], tool_choice="required")
+    sent = json.loads(route.calls[0].request.content)
+    assert "tool_choice" not in sent
+    assert "tools" not in sent
+
+
+def test_anthropic_validate_no_key():
+    provider = AnthropicProvider(api_key="")
+    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+        provider.validate()
+
+
+def test_anthropic_validate_with_key():
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    provider.validate()
+
+
+def test_anthropic_capabilities():
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    caps = provider.capabilities()
+    assert caps.embeddings is False
+    assert caps.function_calling is True
+    assert caps.streaming is True
+    assert caps.vision is True
+    assert caps.max_context_tokens == 200_000
+    assert caps.effort_levels == []
+
+
+def test_anthropic_available_models():
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    models = provider.available_models()
+    assert "claude-3-5-sonnet-latest" in models
+
+
+def test_anthropic_name():
+    provider = AnthropicProvider(api_key="sk-ant-test")
+    assert provider.name == "anthropic"
