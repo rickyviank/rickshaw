@@ -91,6 +91,74 @@ print(caps.embeddings)   # True
 print(caps.effort_levels)  # [Effort.LOW, Effort.MEDIUM, Effort.HIGH]
 ```
 
+## Normalized Tool Calling
+
+The provider interface supports normalized tool calls via `ToolSpec` and `ToolCall`:
+
+```python
+from rickshaw.providers import ToolSpec, ToolCall, get_provider
+
+provider = get_provider("openai", api_key="sk-...")
+tools = [
+    ToolSpec(
+        name="remember",
+        description="Store a fact in memory.",
+        parameters={
+            "type": "object",
+            "properties": {"fact": {"type": "string"}},
+            "required": ["fact"],
+        },
+    )
+]
+
+response = provider.complete(messages, tools=tools)
+for tc in response.tool_calls:
+    print(tc.name, tc.arguments)  # e.g. "remember" {"fact": "..."}
+```
+
+- `Response.tool_calls` defaults to `[]` — existing code is unaffected.
+- Providers without function-calling (e.g. Devin) accept the `tools` parameter but ignore it.
+
+## Semantic Memory Layer
+
+A fully offline semantic memory layer enables persistent, ranked context retrieval:
+
+```python
+from rickshaw.memory import MemoryService
+from rickshaw.memory.embedder import LocalEmbedder
+
+memory = MemoryService(embedder=LocalEmbedder())
+
+# Store a fact
+record = memory.write("User prefers dark mode")
+
+# Retrieve relevant context
+context = memory.assemble_context("What are the user's preferences?")
+```
+
+### Architecture
+
+| Component | Module | Description |
+|---|---|---|
+| **MemoryRecord** | `rickshaw/memory/record.py` | Core data unit with scope, type, importance, embedding |
+| **Embedder** | `rickshaw/memory/embedder.py` | `LocalEmbedder` (offline hash-based) or `ProviderEmbedder` (API-backed) |
+| **Store** | `rickshaw/memory/store.py` | SQLite-backed persistence with scope-filtered cosine search |
+| **Ranker** | `rickshaw/memory/ranker.py` | Weighted-sum scoring (relevance + recency + importance) with MMR diversity |
+| **MemoryService** | `rickshaw/memory/service.py` | Facade: dedupe-on-write, ranked retrieval, `remember`/`recall`/`forget` |
+| **Memory Tools** | `rickshaw/memory/tools.py` | Tool specs + dispatch for LLM-driven memory operations |
+| **PromptBuilder** | `rickshaw/prompt/builder.py` | Token-budgeted prompt assembly; strips sensitive records before egress |
+| **Orchestrator** | `rickshaw/orchestrator.py` | Turn loop: context retrieval → prompt build → provider call → tool dispatch |
+| **Worker** | `rickshaw/worker.py` | Deferred importance scoring, compaction/reflection, TTL eviction |
+| **JobQueue** | `rickshaw/queue.py` | In-memory FIFO queue for deferred work items |
+
+### Offline demo
+
+```bash
+python examples/offline_demo.py
+```
+
+Runs a full turn cycle using `LocalEmbedder` and a fake provider — no API keys needed.
+
 ## Tests
 
 ```bash

@@ -6,7 +6,7 @@ import httpx
 import pytest
 import respx
 
-from rickshaw.providers.base import Effort, Message, Response
+from rickshaw.providers.base import Effort, Message, Response, ToolCall, ToolSpec
 from rickshaw.providers.openai_provider import OpenAIProvider
 from rickshaw.providers.devin_provider import DevinProvider
 
@@ -81,6 +81,102 @@ def test_openai_capabilities():
     assert caps.streaming is True
     assert caps.embeddings is True
     assert caps.max_context_tokens > 0
+
+
+OPENAI_TOOL_CALL_RESPONSE = {
+    "id": "chatcmpl-tool",
+    "object": "chat.completion",
+    "model": "gpt-4o",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "remember",
+                            "arguments": '{"fact": "user prefers dark mode"}',
+                        },
+                    }
+                ],
+            },
+            "finish_reason": "tool_calls",
+        }
+    ],
+    "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+}
+
+
+@respx.mock
+def test_openai_complete_with_tool_calls():
+    """Tool calls in the response are parsed into normalized ToolCall objects."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=OPENAI_TOOL_CALL_RESPONSE)
+    )
+
+    provider = OpenAIProvider(api_key="sk-test")
+    tools = [
+        ToolSpec(
+            name="remember",
+            description="Store a fact",
+            parameters={"type": "object", "properties": {"fact": {"type": "string"}}},
+        )
+    ]
+    messages = [Message(role="user", content="Remember that I like dark mode")]
+    response = provider.complete(messages, tools=tools)
+
+    assert isinstance(response, Response)
+    assert response.text == ""
+    assert len(response.tool_calls) == 1
+
+    tc = response.tool_calls[0]
+    assert isinstance(tc, ToolCall)
+    assert tc.id == "call_abc123"
+    assert tc.name == "remember"
+    assert tc.arguments == {"fact": "user prefers dark mode"}
+    assert tc.raw["type"] == "function"
+
+
+@respx.mock
+def test_openai_complete_without_tool_calls_defaults_empty():
+    """Responses without tool calls default to an empty list."""
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=OPENAI_CHAT_RESPONSE)
+    )
+
+    provider = OpenAIProvider(api_key="sk-test")
+    messages = [Message(role="user", content="Hi")]
+    response = provider.complete(messages)
+
+    assert response.tool_calls == []
+
+
+@respx.mock
+def test_openai_complete_forwards_tools_in_payload():
+    """When tools are provided, they are forwarded in the OpenAI tools format."""
+    route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=OPENAI_CHAT_RESPONSE)
+    )
+
+    provider = OpenAIProvider(api_key="sk-test")
+    tools = [
+        ToolSpec(
+            name="recall",
+            description="Recall memories",
+            parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        )
+    ]
+    messages = [Message(role="user", content="What do you remember?")]
+    provider.complete(messages, tools=tools)
+
+    sent = json.loads(route.calls[0].request.content)
+    assert "tools" in sent
+    assert sent["tools"][0]["type"] == "function"
+    assert sent["tools"][0]["function"]["name"] == "recall"
 
 
 @respx.mock
