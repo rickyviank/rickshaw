@@ -19,6 +19,7 @@ from rickshaw.providers.base import (
     Message,
     Response,
     TokenUsage,
+    ToolSpec,
 )
 
 
@@ -55,8 +56,11 @@ class DevinProvider(LLMProvider):
         self,
         messages: list[Message],
         effort: Effort = Effort.MEDIUM,
+        tools: list[ToolSpec] | None = None,
         **kwargs: Any,
     ) -> Response:
+        # TODO: Forward and parse tool calls once Devin API supports function-calling.
+        # Currently reports function_calling=False; tools parameter is accepted but ignored.
         # TODO: Replace with the actual Devin API endpoint and request shape.
         # TODO: Map the normalized ``Effort`` to Devin's reasoning/effort/iteration parameter.
         payload: dict[str, Any] = {

@@ -14,6 +14,8 @@ from rickshaw.providers.base import (
     LLMProvider,
     Message,
     Response,
+    ToolCall,
+    ToolSpec,
     TokenUsage,
 )
 
@@ -60,10 +62,26 @@ class OpenAIProvider(EmbeddingMixin, LLMProvider):
             "Content-Type": "application/json",
         }
 
+    @staticmethod
+    def _tools_payload(tools: list[ToolSpec]) -> list[dict[str, Any]]:
+        """Convert normalized ToolSpec list into OpenAI tools format."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            }
+            for t in tools
+        ]
+
     def complete(
         self,
         messages: list[Message],
         effort: Effort = Effort.MEDIUM,
+        tools: list[ToolSpec] | None = None,
         **kwargs: Any,
     ) -> Response:
         payload: dict[str, Any] = {
@@ -73,6 +91,9 @@ class OpenAIProvider(EmbeddingMixin, LLMProvider):
 
         if _model_supports_effort(self._model):
             payload["reasoning_effort"] = _EFFORT_MAP[effort]
+
+        if tools:
+            payload["tools"] = self._tools_payload(tools)
 
         payload.update(kwargs)
 
@@ -86,10 +107,16 @@ class OpenAIProvider(EmbeddingMixin, LLMProvider):
             data = resp.json()
 
         choice = data["choices"][0]
+        message = choice["message"]
         usage_data = data.get("usage", {})
 
+        parsed_tool_calls = [
+            ToolCall.from_openai(tc)
+            for tc in message.get("tool_calls", [])
+        ]
+
         return Response(
-            text=choice["message"]["content"],
+            text=message.get("content") or "",
             model=data.get("model", self._model),
             usage=TokenUsage(
                 prompt_tokens=usage_data.get("prompt_tokens", 0),
@@ -98,14 +125,17 @@ class OpenAIProvider(EmbeddingMixin, LLMProvider):
             ),
             effort=effort,
             raw=data,
+            tool_calls=parsed_tool_calls,
         )
 
     def stream(
         self,
         messages: list[Message],
         effort: Effort = Effort.MEDIUM,
+        tools: list[ToolSpec] | None = None,
         **kwargs: Any,
     ) -> Iterator[str]:
+        # TODO: streaming tool-call parsing can be deferred
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
