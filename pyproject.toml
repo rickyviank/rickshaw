@@ -21,11 +21,10 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "respx>=0.21.0",
 ]
-# Optional: indexed/SIMD vector search via the sqlite-vector extension.
-# Requires a Python sqlite3 built with extension-loading support; falls back
-# to brute-force cosine otherwise. See rickshaw/memory/_vector_ext.py.
+# Optional: indexed vector search via ChromaDB. Falls back to brute-force
+# cosine when unavailable. See rickshaw/memory/_chroma_index.py.
 vector = [
-    "sqliteai-vector>=0.1.0",
+    "chromadb>=0.5.0",
 ]
 # Optional: JSON-schema validation of tool-call arguments in the registry.
 schema = [

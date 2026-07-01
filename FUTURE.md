@@ -17,14 +17,15 @@ Next:
 
 ## Vector Search
 
-Today: `MemoryStore` uses the `sqlite-vector` extension when available
-(indexed / SIMD KNN), falling back to a brute-force cosine scan otherwise.
-Scope filtering is always applied in SQL first.
+Today: SQLite is the source of truth; `MemoryStore` mirrors embeddings into a
+ChromaDB index for indexed KNN search (scope filtering via Chroma metadata),
+falling back to a brute-force cosine scan when ChromaDB is unavailable.
 
 Next:
+- Keep SQLite and the Chroma index consistent under concurrent access / crashes
+  (re-index / backfill on startup if they diverge).
 - Store embeddings as binary blobs even on the fallback path (avoid JSON).
-- Batch writes in a single transaction during compaction.
-- Evaluate ANN index tuning for large stores.
+- Evaluate ANN index tuning (HNSW params) for large stores.
 
 ## Deferred Worker
 

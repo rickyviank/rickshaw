@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from rickshaw.memory._chroma_index import chroma_available
 from rickshaw.memory._math import cosine_similarity
 from rickshaw.memory.embedder import ProviderEmbedder, TFIDFEmbedder
 from rickshaw.memory.ranker import Ranker
@@ -334,14 +335,14 @@ def test_assemble_context_budget_filled_by_non_sensitive():
 
 
 # ---------------------------------------------------------------------------
-# Memory store: vector-search extension detection + fallback (item 4)
+# Memory store: ChromaDB vector index detection + fallback (item 4)
 # ---------------------------------------------------------------------------
 
-def test_store_falls_back_to_bruteforce_without_extension():
-    """Without the sqlite-vector extension, search uses brute-force cosine."""
+def test_store_search_works_regardless_of_backend():
+    """Search returns correct results whether ChromaDB or the fallback is used."""
     store = MemoryStore(vector_dim=32)
-    # Stock sqlite3 builds usually lack extension loading; either way the
-    # store must remain fully functional via the fallback path.
+    # ChromaDB may or may not be installed; either way the store must remain
+    # fully functional (indexed KNN or brute-force cosine fallback).
     rec = MemoryRecord(
         text="hello",
         embedding=[1.0] + [0.0] * 31,
@@ -355,21 +356,44 @@ def test_store_falls_back_to_bruteforce_without_extension():
     assert results[0][1] == pytest.approx(1.0, abs=1e-6)
 
 
-def test_store_use_vector_ext_disabled():
-    """use_vector_ext=False guarantees the brute-force path."""
-    store = MemoryStore(vector_dim=32, use_vector_ext=False)
+def test_store_use_vector_index_disabled():
+    """use_vector_index=False guarantees the brute-force path."""
+    store = MemoryStore(vector_dim=32, use_vector_index=False)
     assert store.vector_search_enabled is False
 
 
 def test_store_search_scope_filter_bruteforce():
     """Scope filter is applied before ranking on the fallback path."""
-    store = MemoryStore(vector_dim=8, use_vector_ext=False)
+    store = MemoryStore(vector_dim=8, use_vector_index=False)
     vec = [1.0] + [0.0] * 7
     store.put(MemoryRecord(text="g", embedding=vec, scope=MemoryScope.GLOBAL, type=MemoryType.FACT))
     store.put(MemoryRecord(text="s", embedding=vec, scope=MemoryScope.SESSION, type=MemoryType.FACT))
     results = store.search(vec, scope_filter=[MemoryScope.GLOBAL], limit=5)
     assert len(results) == 1
     assert results[0][0].scope == MemoryScope.GLOBAL
+
+
+@pytest.mark.skipif(
+    not chroma_available(), reason="chromadb not installed"
+)
+def test_store_chroma_index_path():
+    """When ChromaDB is installed, the indexed KNN path is used and correct."""
+    store = MemoryStore(vector_dim=8, use_vector_index=True)
+    assert store.vector_search_enabled is True
+    near = [1.0] + [0.0] * 7
+    far = [0.0] * 7 + [1.0]
+    r_near = MemoryRecord(text="near", embedding=near, scope=MemoryScope.GLOBAL, type=MemoryType.FACT)
+    r_far = MemoryRecord(text="far", embedding=far, scope=MemoryScope.GLOBAL, type=MemoryType.FACT)
+    store.put(r_near)
+    store.put(r_far)
+    results = store.search(near, scope_filter=[MemoryScope.GLOBAL], limit=2)
+    assert results[0][0].id == r_near.id
+    # Scope filtering happens in the index (metadata filter).
+    assert store.search(near, scope_filter=[MemoryScope.SESSION], limit=2) == []
+    # Deleted records leave the index.
+    store.delete(r_near.id)
+    ids = [rec.id for rec, _ in store.search(near, limit=2)]
+    assert r_near.id not in ids
 
 
 # ---------------------------------------------------------------------------

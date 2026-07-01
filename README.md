@@ -176,7 +176,7 @@ toward learned embeddings (see [FUTURE.md](FUTURE.md)).
 |---|---|---|
 | **MemoryRecord** | `rickshaw/memory/record.py` | Core data unit with scope, type, importance, embedding |
 | **Embedder** | `rickshaw/memory/embedder.py` | `TFIDFEmbedder` (offline, semantic) or `ProviderEmbedder` (API-backed) |
-| **Store** | `rickshaw/memory/store.py` | SQLite persistence; scope-filtered search via `sqlite-vector` (KNN) with brute-force cosine fallback |
+| **Store** | `rickshaw/memory/store.py` | SQLite persistence (source of truth); scope-filtered KNN search via ChromaDB with brute-force cosine fallback |
 | **Ranker** | `rickshaw/memory/ranker.py` | Weighted-sum scoring (relevance + recency + importance) with MMR diversity |
 | **MemoryService** | `rickshaw/memory/service.py` | Facade: dedupe-on-write, sensitive filtering, ranked retrieval, `remember`/`recall`/`forget` |
 | **Memory Tools** | `rickshaw/memory/tools.py` | Tool specs + `build_memory_registry` wiring memory ops into a `ToolRegistry` |
@@ -196,12 +196,14 @@ Runs a full turn cycle using `TFIDFEmbedder` and a fake provider — no API keys
 
 ### Optional: indexed vector search
 
-`MemoryStore` uses the [`sqlite-vector`](https://github.com/sqliteai/sqlite-vector)
-extension for indexed KNN search when available, and transparently falls back to
-a brute-force cosine scan otherwise (a warning is logged). To enable it:
+`MemoryStore` keeps SQLite as the source of truth and mirrors embeddings into a
+[ChromaDB](https://www.trychroma.com/) index for indexed KNN search (scope
+filtering is applied via Chroma metadata). When ChromaDB isn't installed it
+transparently falls back to a brute-force cosine scan (a warning is logged). To
+enable it:
 
 ```bash
-pip install -e ".[vector]"   # requires a Python sqlite3 built with extension loading
+pip install -e ".[vector]"   # installs chromadb
 ```
 
 ## Tests
