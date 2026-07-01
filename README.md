@@ -1,6 +1,15 @@
 # Rickshaw
 
+```
+o--o  rickshaw · your driver, your memory
+```
+
 A multi-LLM provider harness with a normalized interface and user-selectable reasoning effort levels.
+
+The slogan captures the two pillars:
+
+- **your driver** — pick any driver/model behind one normalized interface (OpenAI, Devin, or your own provider) and dial the reasoning effort per session or per turn.
+- **your memory** — a fully offline, user-owned [semantic memory layer](#semantic-memory-layer) that persists and ranks context so it travels with you across providers.
 
 ## Setup
 
@@ -55,6 +64,27 @@ python -m rickshaw --provider openai
 # Validate connectivity only
 rickshaw --provider openai --validate-only
 ```
+
+### Terminal UI (`rickshaw-tui`)
+
+A lightweight, Rich-formatted alternative to the plain REPL. It is *not* a
+full-screen app — just the same line-oriented loop with prettier output
+(branded header panel, Markdown-rendered replies, and a per-turn status line).
+Crucially, every turn is routed through the `Orchestrator`, so the semantic
+memory layer (`remember`/`recall`/`forget`) and graceful-degradation info are
+active and surfaced.
+
+```bash
+# Install the optional extra (adds Rich)
+pip install -e ".[tui]"
+
+# Launch it
+rickshaw-tui --provider openai --effort high
+```
+
+Memory persists to a local SQLite file (`--db-path`, default
+`rickshaw_memory.db`) so context carries across sessions. Slash-commands match
+the REPL: `/effort <level>`, `/quit`, `/exit`.
 
 ### Effort levels
 
@@ -205,6 +235,15 @@ enable it:
 ```bash
 pip install -e ".[vector]"   # installs chromadb
 ```
+
+### Optional extras
+
+| Extra | Install | Purpose |
+|---|---|---|
+| `tui` | `pip install -e ".[tui]"` | Rich-based terminal UI (`rickshaw-tui`). |
+| `vector` | `pip install -e ".[vector]"` | Indexed KNN search via ChromaDB (brute-force fallback otherwise). |
+| `schema` | `pip install -e ".[schema]"` | JSON-schema validation of tool-call arguments. |
+| `dev` | `pip install -e ".[dev]"` | Test toolchain (pytest, respx). |
 
 ## Tests
 

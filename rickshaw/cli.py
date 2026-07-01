@@ -56,8 +56,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _print_header(provider: LLMProvider, effort: Effort) -> None:
+    # Imported lazily to avoid a circular import (tui imports from cli) and to
+    # keep the branding strings in one place.
+    from rickshaw.tui import RICKSHAW_LOGO, RICKSHAW_SLOGAN
+
     caps = provider.capabilities()
     effort_support = caps.effort_levels
+    print(f"{RICKSHAW_LOGO} \u00b7 {RICKSHAW_SLOGAN}")
     print(f"Rickshaw  provider={provider.name}  effort={effort.value}")
     if effort_support:
         levels = ", ".join(e.value for e in effort_support)
