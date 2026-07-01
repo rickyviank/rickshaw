@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterator
 
-from rickshaw.memory.embedder import LocalEmbedder
+from rickshaw.memory.embedder import TFIDFEmbedder
 from rickshaw.memory.service import MemoryService
 from rickshaw.orchestrator import Orchestrator
 from rickshaw.providers.base import (
@@ -100,7 +100,7 @@ def main() -> None:
     print("=== Rickshaw Offline Demo ===\n")
 
     # Set up components
-    embedder = LocalEmbedder(dim=32)
+    embedder = TFIDFEmbedder(dim=32)
     memory = MemoryService(embedder=embedder)
     provider = FakeLLMProvider()
     queue = JobQueue()
