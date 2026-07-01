@@ -7,7 +7,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from rickshaw.memory.embedder import LocalEmbedder
+from rickshaw.memory.embedder import TFIDFEmbedder
 from rickshaw.memory.service import MemoryService
 from rickshaw.orchestrator import Orchestrator
 from rickshaw.providers.base import (
@@ -105,13 +105,15 @@ class _FakeProvider(LLMProvider):
 def test_run_turn_with_tool_calls():
     """Full cycle: tool call dispatched, memory written, deferred job enqueued."""
     provider = _FakeProvider(function_calling=True)
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     queue = JobQueue()
     orch = Orchestrator(provider=provider, memory=memory, queue=queue)
 
     result = orch.run_turn("Remember something")
 
-    assert result == "Final answer"
+    assert result.text == "Final answer"
+    assert result.tool_calls_made == 1
+    assert result.degraded is False
     # Provider should be called exactly twice (initial + follow-up after tool)
     assert len(provider.call_log) == 2
     # Memory should have the fact stored via the tool call
@@ -125,49 +127,60 @@ def test_run_turn_with_tool_calls():
 def test_run_turn_no_function_calling():
     """Provider without function_calling: no tools advertised, no tool calls."""
     provider = _FakeProvider(function_calling=False)
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     queue = JobQueue()
     orch = Orchestrator(provider=provider, memory=memory, queue=queue)
 
     result = orch.run_turn("Hello")
 
-    assert result == "Final answer"
+    assert result.text == "Final answer"
     # Should be called exactly once (no tool rounds)
     assert len(provider.call_log) == 1
     # No tools should have been passed
     assert provider.call_log[0]["tools"] is None
+    # A warning about missing function-calling should be surfaced (item 7)
+    assert any("function-calling" in w for w in result.warnings)
 
 
 def test_run_turn_provider_failure_degrades():
     """Provider raises — orchestrator degrades to local retrieval."""
     provider = _FakeProvider(fail_on_call=True)
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     queue = JobQueue()
-    orch = Orchestrator(provider=provider, memory=memory, queue=queue)
+    orch = Orchestrator(
+        provider=provider, memory=memory, queue=queue, retry_backoff=0,
+    )
 
     result = orch.run_turn("What do you know?")
 
-    assert "Provider unavailable" in result
+    assert result.degraded is True
+    assert "Provider unreachable" in result.text
+    assert any("Provider unreachable" in w for w in result.warnings)
+    # Transient error retried max_retries times before degrading (item 6).
+    assert len(provider.call_log) == orch.max_retries + 1
 
 
 def test_run_turn_provider_failure_returns_memory_if_available():
     """On provider failure, local memory results are returned if available."""
     provider = _FakeProvider(fail_on_call=True)
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     memory.write("important stored fact")
     queue = JobQueue()
-    orch = Orchestrator(provider=provider, memory=memory, queue=queue)
+    orch = Orchestrator(
+        provider=provider, memory=memory, queue=queue, retry_backoff=0,
+    )
 
     result = orch.run_turn("important stored fact")
 
-    assert "Provider unavailable" in result
-    assert "important stored fact" in result
+    assert "Provider unreachable" in result.text
+    assert "important stored fact" in result.text
+    assert result.degraded is True
 
 
 def test_sensitive_records_never_in_messages():
     """Sensitive records must not appear in the messages sent to the provider."""
     provider = _FakeProvider(function_calling=False)
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     memory.write("public info", sensitive=False)
     memory.write("TOP SECRET credential", sensitive=True)
     queue = JobQueue()
@@ -180,30 +193,43 @@ def test_sensitive_records_never_in_messages():
     assert "TOP SECRET" not in all_content
 
 
-def test_bounded_tool_rounds():
-    """Tool loop should not exceed max_tool_rounds."""
+class _InfiniteToolProvider(_FakeProvider):
+    """Always returns a tool call of *tool_name* (never terminates on its own)."""
 
-    class _InfiniteToolProvider(_FakeProvider):
-        def complete(
-            self,
-            messages: list[Message],
-            effort: Effort = Effort.MEDIUM,
-            tools: list[ToolSpec] | None = None,
-            **kwargs: Any,
-        ) -> Response:
-            self._call_count += 1
-            self.call_log.append({"call_number": self._call_count})
-            return Response(
-                text="still calling tools",
-                model="fake",
-                effort=effort,
-                tool_calls=[
-                    ToolCall(id=f"tc{self._call_count}", name="recall", arguments={"query": "x"})
-                ],
-            )
+    def __init__(self, tool_name: str, arguments: dict, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._tool_name = tool_name
+        self._arguments = arguments
 
-    provider = _InfiniteToolProvider(function_calling=True)
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    def complete(
+        self,
+        messages: list[Message],
+        effort: Effort = Effort.MEDIUM,
+        tools: list[ToolSpec] | None = None,
+        **kwargs: Any,
+    ) -> Response:
+        self._call_count += 1
+        self.call_log.append({"call_number": self._call_count})
+        return Response(
+            text="still calling tools",
+            model="fake",
+            effort=effort,
+            tool_calls=[
+                ToolCall(
+                    id=f"tc{self._call_count}",
+                    name=self._tool_name,
+                    arguments=self._arguments,
+                )
+            ],
+        )
+
+
+def test_bounded_tool_rounds_side_effecting():
+    """Side-effecting tool calls are bounded by max_tool_rounds."""
+    provider = _InfiniteToolProvider(
+        "remember", {"fact": "x"}, function_calling=True,
+    )
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     queue = JobQueue()
     orch = Orchestrator(
         provider=provider, memory=memory, queue=queue, max_tool_rounds=2,
@@ -211,5 +237,28 @@ def test_bounded_tool_rounds():
 
     orch.run_turn("go forever")
 
-    # 1 initial + 2 tool rounds = 3 total
+    # 1 initial + 2 side-effecting tool rounds = 3 total
     assert len(provider.call_log) == 3
+
+
+def test_read_only_tools_exempt_from_round_limit():
+    """Read-only tool calls (recall) don't count against max_tool_rounds (item 6).
+
+    They are only bounded by the hard safety cap, so the number of calls
+    exceeds ``max_tool_rounds + 1``.
+    """
+    from rickshaw.orchestrator import _HARD_ITERATION_CAP
+
+    provider = _InfiniteToolProvider(
+        "recall", {"query": "x"}, function_calling=True,
+    )
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
+    queue = JobQueue()
+    orch = Orchestrator(
+        provider=provider, memory=memory, queue=queue, max_tool_rounds=2,
+    )
+
+    orch.run_turn("recall forever")
+
+    # Read-only calls bypass max_tool_rounds; bounded only by the hard cap.
+    assert len(provider.call_log) == _HARD_ITERATION_CAP + 1

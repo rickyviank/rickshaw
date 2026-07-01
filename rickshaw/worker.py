@@ -26,6 +26,10 @@ class DeferredWorker:
     Uses the same injected LLMProvider as the orchestrator (for LLM-gated
     tasks like importance scoring and compaction/reflection). Local-only
     eviction requires no provider.
+
+    FUTURE: run in a background thread/process with its own event loop, support
+    a separate (cheaper) provider for background tasks, and a priority queue so
+    foreground turns take precedence. See FUTURE.md ("Deferred Worker").
     """
 
     def __init__(

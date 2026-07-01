@@ -19,6 +19,7 @@ from rickshaw.providers.base import (
     Message,
     Response,
     TokenUsage,
+    ToolCall,
     ToolSpec,
 )
 
@@ -52,15 +53,26 @@ class DevinProvider(LLMProvider):
             "Content-Type": "application/json",
         }
 
+    @staticmethod
+    def _parse_tool_calls(raw_calls: list[dict[str, Any]]) -> list[ToolCall]:
+        """Parse Devin-format tool calls into normalized :class:`ToolCall`s.
+
+        Devin does not yet support function-calling, so this returns an empty
+        list. Implement once the Devin API documents its tool-call format.
+        """
+        # TODO: Parse tool calls once the Devin API supports function-calling.
+        return []
+
     def complete(
         self,
         messages: list[Message],
         effort: Effort = Effort.MEDIUM,
         tools: list[ToolSpec] | None = None,
+        tool_choice: str | None = None,
         **kwargs: Any,
     ) -> Response:
         # TODO: Forward and parse tool calls once Devin API supports function-calling.
-        # Currently reports function_calling=False; tools parameter is accepted but ignored.
+        # Currently reports function_calling=False; tools/tool_choice are accepted but ignored.
         # TODO: Replace with the actual Devin API endpoint and request shape.
         # TODO: Map the normalized ``Effort`` to Devin's reasoning/effort/iteration parameter.
         payload: dict[str, Any] = {

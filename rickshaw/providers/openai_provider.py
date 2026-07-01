@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json as _json
 import os
 from typing import Any, Iterator
 
@@ -63,6 +64,31 @@ class OpenAIProvider(EmbeddingMixin, LLMProvider):
         }
 
     @staticmethod
+    def _parse_tool_calls(raw_calls: list[dict[str, Any]]) -> list[ToolCall]:
+        """Parse OpenAI-format tool calls into normalized :class:`ToolCall`s.
+
+        Handles the ``{"function": {"name": ..., "arguments": "..."}}`` shape,
+        where ``arguments`` is a JSON-encoded string.
+        """
+        parsed: list[ToolCall] = []
+        for raw_call in raw_calls:
+            func = raw_call.get("function", {})
+            args_str = func.get("arguments", "{}")
+            try:
+                args = _json.loads(args_str)
+            except (_json.JSONDecodeError, TypeError):
+                args = {}
+            parsed.append(
+                ToolCall(
+                    id=raw_call.get("id", ""),
+                    name=func.get("name", ""),
+                    arguments=args,
+                    raw=raw_call,
+                )
+            )
+        return parsed
+
+    @staticmethod
     def _tools_payload(tools: list[ToolSpec]) -> list[dict[str, Any]]:
         """Convert normalized ToolSpec list into OpenAI tools format."""
         return [
@@ -82,6 +108,7 @@ class OpenAIProvider(EmbeddingMixin, LLMProvider):
         messages: list[Message],
         effort: Effort = Effort.MEDIUM,
         tools: list[ToolSpec] | None = None,
+        tool_choice: str | None = None,
         **kwargs: Any,
     ) -> Response:
         payload: dict[str, Any] = {
@@ -94,6 +121,8 @@ class OpenAIProvider(EmbeddingMixin, LLMProvider):
 
         if tools:
             payload["tools"] = self._tools_payload(tools)
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
 
         payload.update(kwargs)
 
@@ -110,10 +139,7 @@ class OpenAIProvider(EmbeddingMixin, LLMProvider):
         message = choice["message"]
         usage_data = data.get("usage", {})
 
-        parsed_tool_calls = [
-            ToolCall.from_openai(tc)
-            for tc in message.get("tool_calls", [])
-        ]
+        parsed_tool_calls = self._parse_tool_calls(message.get("tool_calls", []))
 
         return Response(
             text=message.get("content") or "",
@@ -133,6 +159,7 @@ class OpenAIProvider(EmbeddingMixin, LLMProvider):
         messages: list[Message],
         effort: Effort = Effort.MEDIUM,
         tools: list[ToolSpec] | None = None,
+        tool_choice: str | None = None,
         **kwargs: Any,
     ) -> Iterator[str]:
         # TODO: streaming tool-call parsing can be deferred

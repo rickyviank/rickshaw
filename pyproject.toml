@@ -21,6 +21,15 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "respx>=0.21.0",
 ]
+# Optional: indexed vector search via ChromaDB. Falls back to brute-force
+# cosine when unavailable. See rickshaw/memory/_chroma_index.py.
+vector = [
+    "chromadb>=0.5.0",
+]
+# Optional: JSON-schema validation of tool-call arguments in the registry.
+schema = [
+    "jsonschema>=4.0.0",
+]
 
 [project.scripts]
 rickshaw = "rickshaw.cli:main"

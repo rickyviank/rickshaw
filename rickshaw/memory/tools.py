@@ -1,4 +1,4 @@
-"""Memory tools — remember/recall/forget as normalized tool specs + dispatch."""
+"""Memory tools — remember/recall/forget as normalized tool specs + registry wiring."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING
 
 from rickshaw.providers.base import ToolCall, ToolSpec
+from rickshaw.tool_registry import ToolRegistry
 
 if TYPE_CHECKING:
     from rickshaw.memory.service import MemoryService
@@ -24,6 +25,8 @@ REMEMBER_SPEC = ToolSpec(
         },
         "required": ["fact"],
     },
+    category="memory",
+    side_effect=True,
 )
 
 RECALL_SPEC = ToolSpec(
@@ -39,6 +42,8 @@ RECALL_SPEC = ToolSpec(
         },
         "required": ["query"],
     },
+    category="memory",
+    side_effect=False,  # read-only: does not count against the tool-round budget
 )
 
 FORGET_SPEC = ToolSpec(
@@ -54,29 +59,42 @@ FORGET_SPEC = ToolSpec(
         },
         "required": ["id"],
     },
+    category="memory",
+    side_effect=True,
 )
 
 MEMORY_TOOL_SPECS: list[ToolSpec] = [REMEMBER_SPEC, RECALL_SPEC, FORGET_SPEC]
+
+
+def build_memory_registry(
+    memory_service: MemoryService,
+    registry: ToolRegistry | None = None,
+) -> ToolRegistry:
+    """Register the memory tools (remember/recall/forget) on a ToolRegistry.
+
+    Non-memory tools (web search, file ops, ...) can be registered separately on
+    the same registry. Returns the registry for convenience.
+    """
+    registry = registry or ToolRegistry()
+    registry.register(
+        "remember", lambda args: memory_service.remember(args.get("fact", "")), REMEMBER_SPEC
+    )
+    registry.register(
+        "recall", lambda args: memory_service.recall(args.get("query", "")), RECALL_SPEC
+    )
+    registry.register(
+        "forget", lambda args: memory_service.forget(args.get("id", "")), FORGET_SPEC
+    )
+    return registry
 
 
 def dispatch_tool_call(
     tool_call: ToolCall,
     memory_service: MemoryService,
 ) -> str:
-    """Map a normalized ToolCall to the corresponding memory operation.
+    """Backward-compatible convenience wrapper that dispatches via a registry.
 
-    Returns a JSON-serialized result suitable for a tool/role="tool" message.
+    Prefer constructing a :class:`ToolRegistry` (see :func:`build_memory_registry`)
+    and calling :meth:`ToolRegistry.dispatch` directly.
     """
-    name = tool_call.name
-    args = tool_call.arguments
-
-    if name == "remember":
-        result = memory_service.remember(args.get("fact", ""))
-    elif name == "recall":
-        result = memory_service.recall(args.get("query", ""))
-    elif name == "forget":
-        result = memory_service.forget(args.get("id", ""))
-    else:
-        result = f"unknown tool: {name}"
-
-    return json.dumps(result)
+    return build_memory_registry(memory_service).dispatch(tool_call)

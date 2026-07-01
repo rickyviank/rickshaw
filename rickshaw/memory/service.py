@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rickshaw.memory._math import cosine_similarity
-from rickshaw.memory.embedder import Embedder, LocalEmbedder
+from rickshaw.memory.embedder import Embedder, TFIDFEmbedder
 from rickshaw.memory.ranker import Ranker
 from rickshaw.memory.record import MemoryRecord, MemoryScope, MemoryType
 from rickshaw.memory.store import MemoryStore
@@ -34,8 +34,8 @@ class MemoryService:
         dedupe_threshold: float = _DEDUPE_THRESHOLD,
         context_budget: int = 10,
     ) -> None:
-        self.embedder = embedder or LocalEmbedder()
-        self.store = store or MemoryStore(db_path)
+        self.embedder = embedder or TFIDFEmbedder()
+        self.store = store or MemoryStore(db_path, vector_dim=self.embedder.dimension)
         self.ranker = ranker or Ranker()
         self.dedupe_threshold = dedupe_threshold
         self.context_budget = context_budget
@@ -50,6 +50,10 @@ class MemoryService:
             scope_filter = [MemoryScope.GLOBAL, MemoryScope.SESSION]
         query_vec = self.embedder.embed(query)
         candidates = self.store.search(query_vec, scope_filter=scope_filter)
+        # Egress/privacy boundary: exclude sensitive records BEFORE ranking so
+        # the context budget is filled entirely with shareable records (the
+        # ranker and prompt builder never see sensitive data).
+        candidates = [(r, s) for r, s in candidates if not r.sensitive]
         ranked = self.ranker.rank(candidates, limit=self.context_budget)
         # Touch last_used_at on retrieved records
         now = datetime.now(timezone.utc)
@@ -72,7 +76,10 @@ class MemoryService:
         Returns the new record, or ``None`` if a duplicate was detected.
         """
         embedding = self.embedder.embed(text)
-        # Dedupe: check existing records
+        # Dedupe: check existing records.
+        # FUTURE: dedup should be scope-aware, update-on-duplicate (bump
+        # last_used_at/use_count instead of discarding), and use an adaptive
+        # per-model threshold. See FUTURE.md ("Deduplication").
         existing = self.store.search(embedding, limit=5)
         for record, sim in existing:
             if sim >= self.dedupe_threshold:

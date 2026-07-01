@@ -1,7 +1,9 @@
-"""PromptBuilder — the single egress chokepoint.
+"""PromptBuilder — assembles the outgoing prompt within a token budget.
 
-Enforces a token budget and strips sensitive/local-only records before
-serialization so they never leave the local boundary.
+Sensitive/local-only records are excluded upstream in
+:meth:`MemoryService.assemble_context` (the privacy/egress boundary), so by the
+time records reach the builder they are already safe to serialize. The builder's
+remaining job is to cap the total prompt size to *max_tokens*.
 """
 
 from __future__ import annotations
@@ -23,8 +25,9 @@ def _estimate_tokens(text: str) -> int:
 class PromptBuilder:
     """Build a ``list[Message]`` ready for ``LLMProvider.complete()``.
 
-    The builder is the privacy/egress boundary: sensitive records are stripped
-    and the total size is capped to *max_tokens*.
+    Sensitive records are filtered out upstream (see
+    :meth:`MemoryService.assemble_context`); the builder only enforces the
+    *max_tokens* budget.
     """
 
     def __init__(self, max_tokens: int = 8000) -> None:
@@ -39,10 +42,12 @@ class PromptBuilder:
     ) -> list[Message]:
         """Assemble a prompt from system instructions, context, and user input.
 
-        * Sensitive records are **stripped** (never serialized).
         * The context section is truncated to fit the token budget.
         * Tool specs are passed through to the provider via the ``tools``
           argument (not embedded in message text).
+
+        Sensitive records are expected to have already been excluded by
+        :meth:`MemoryService.assemble_context`.
         """
         messages: list[Message] = []
 
@@ -55,11 +60,10 @@ class PromptBuilder:
         headroom = 200  # reserve for tool overhead / response
         remaining = self.max_tokens - system_tokens - user_tokens - headroom
 
-        # Filter and serialize context records (strip sensitive ones)
-        safe_records = [r for r in context if not r.sensitive]
+        # Serialize context records within the remaining token budget.
         context_parts: list[str] = []
         used = 0
-        for record in safe_records:
+        for record in context:
             part = f"[{record.scope.value}/{record.type.value}] {record.text}"
             part_tokens = _estimate_tokens(part)
             if used + part_tokens > remaining:

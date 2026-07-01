@@ -1,35 +1,79 @@
 """Orchestrator — owns the turn loop.
 
 The only hot-path caller of the provider. Depends on LLMProvider via
-dependency injection, forwards Effort, advertises memory tool specs,
-and dispatches returned tool calls.
+dependency injection, forwards Effort, advertises tool specs from an injected
+:class:`ToolRegistry`, and dispatches returned tool calls.
 """
 
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import dataclass, field
+
+import httpx
 
 from rickshaw.memory.service import MemoryService
-from rickshaw.memory.tools import MEMORY_TOOL_SPECS, dispatch_tool_call
+from rickshaw.memory.tools import build_memory_registry
 from rickshaw.prompt.builder import PromptBuilder
-from rickshaw.providers.base import Effort, LLMProvider, Message
+from rickshaw.providers.base import Effort, LLMProvider, Message, Response
 from rickshaw.queue import Job, JobQueue, JobType
+from rickshaw.tool_registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 _MAX_TOOL_ROUNDS = 3
+_MAX_RETRIES = 2
+_RETRY_BACKOFF = 1.0  # seconds; delay = backoff * 2**attempt (1s, 2s)
+# Absolute safety cap on loop iterations, so a stream of read-only tool calls
+# (which don't count against max_tool_rounds) can't spin forever.
+_HARD_ITERATION_CAP = 20
+
+_PROVIDER_UNREACHABLE_MSG = "Provider unreachable — showing cached results"
+
 _DEFAULT_SYSTEM = (
     "You are a helpful assistant with access to a semantic memory layer. "
     "Use the provided tools to remember, recall, or forget information."
 )
 
 
+@dataclass
+class TurnResult:
+    """Structured result of a single turn.
+
+    ``text`` is the assistant's final text. ``warnings`` surfaces degradation
+    (provider unreachable, function-calling unsupported) so callers/CLIs can
+    display it without parsing ``text``. ``tool_calls_made`` counts dispatched
+    tool calls. ``degraded`` is True when the turn fell back to local memory.
+    """
+
+    text: str
+    warnings: list[str] = field(default_factory=list)
+    tool_calls_made: int = 0
+    degraded: bool = False
+
+    def __str__(self) -> str:  # convenience for print()/logging
+        return self.text
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Whether *exc* is a transient provider error worth retrying."""
+    if isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        return code == 429 or code >= 500
+    return False
+
+
 class Orchestrator:
     """Turn loop with memory-augmented retrieval and tool dispatch.
 
     Degrades gracefully if:
-    * The provider is unreachable (still allows local remember/recall/ranking).
-    * The provider reports ``function_calling=False`` (skips tool advertising).
+    * The provider is unreachable (retries with backoff, then falls back to
+      local remember/recall/ranking).
+    * The provider reports ``function_calling=False`` (skips tool advertising
+      and surfaces a warning).
     """
 
     def __init__(
@@ -38,34 +82,81 @@ class Orchestrator:
         memory: MemoryService,
         prompt_builder: PromptBuilder | None = None,
         queue: JobQueue | None = None,
+        registry: ToolRegistry | None = None,
         system: str = _DEFAULT_SYSTEM,
         effort: Effort = Effort.MEDIUM,
         max_tool_rounds: int = _MAX_TOOL_ROUNDS,
+        max_retries: int = _MAX_RETRIES,
+        retry_backoff: float = _RETRY_BACKOFF,
     ) -> None:
         self.provider = provider
         self.memory = memory
         self.prompt_builder = prompt_builder or PromptBuilder()
         self.queue = queue or JobQueue()
+        # Tool dispatch is decoupled from MemoryService via the registry. Memory
+        # tools are registered here at construction; callers may inject a
+        # pre-populated registry (e.g. with additional non-memory tools).
+        self.registry = registry or build_memory_registry(memory)
         self.system = system
         self.effort = effort
         self.max_tool_rounds = max_tool_rounds
+        self.max_retries = max_retries
+        self.retry_backoff = retry_backoff
 
-    def run_turn(self, task_input: str) -> str:
+        # Session-start capability notice (item 7).
+        if not self.provider.capabilities().function_calling:
+            logger.info(
+                "Provider '%s' does not support function-calling; memory tools "
+                "will not be advertised to the model. Context retrieval is "
+                "harness-driven.",
+                self.provider.name,
+            )
+
+    def _complete_with_retry(self, messages: list[Message], tool_specs) -> Response:
+        """Call the provider, retrying transient errors with exponential backoff."""
+        attempt = 0
+        while True:
+            try:
+                return self.provider.complete(
+                    messages, effort=self.effort, tools=tool_specs,
+                )
+            except Exception as exc:
+                if _is_transient_error(exc) and attempt < self.max_retries:
+                    delay = self.retry_backoff * (2 ** attempt)
+                    logger.warning(
+                        "Transient provider error (attempt %d/%d), retrying in %.1fs: %s",
+                        attempt + 1, self.max_retries, delay, exc,
+                    )
+                    if delay > 0:
+                        time.sleep(delay)
+                    attempt += 1
+                    continue
+                raise
+
+    def run_turn(self, task_input: str) -> TurnResult:
         """Execute a single conversational turn.
 
         1. Assemble context from memory.
         2. Build the prompt.
-        3. Call the provider (with tool specs if supported).
-        4. Dispatch any tool calls; loop up to *max_tool_rounds*.
+        3. Call the provider (with tool specs if supported), retrying transient
+           errors with backoff.
+        4. Dispatch any tool calls via the registry; loop up to
+           *max_tool_rounds* (read-only calls are exempt from the count).
         5. Write observations to memory.
         6. Enqueue deferred jobs (importance scoring).
-        7. Return the final text.
+        7. Return a :class:`TurnResult`.
         """
+        warnings: list[str] = []
         ctx = self.memory.assemble_context(task_input)
 
         caps = self.provider.capabilities()
         use_tools = caps.function_calling
-        tool_specs = MEMORY_TOOL_SPECS if use_tools else None
+        tool_specs = self.registry.specs() if use_tools else None
+        if not use_tools:
+            warnings.append(
+                f"Provider '{self.provider.name}' does not support function-calling; "
+                "memory tools not advertised. Context retrieval is harness-driven."
+            )
 
         messages = self.prompt_builder.build(
             system=self.system,
@@ -75,38 +166,56 @@ class Orchestrator:
         )
 
         try:
-            response = self.provider.complete(
-                messages, effort=self.effort, tools=tool_specs,
-            )
+            response = self._complete_with_retry(messages, tool_specs)
         except Exception as exc:
-            logger.warning("Provider call failed: %s", exc)
-            # Degrade: still do local retrieval
+            logger.warning("Provider unreachable after retries: %s", exc)
+            warnings.append(_PROVIDER_UNREACHABLE_MSG)
             results = self.memory.recall(task_input)
             if results:
-                return "Provider unavailable. From memory: " + "; ".join(
-                    r["text"] for r in results
+                text = (
+                    f"{_PROVIDER_UNREACHABLE_MSG}:\n"
+                    + "; ".join(r["text"] for r in results)
                 )
-            return f"Provider unavailable: {exc}"
+            else:
+                text = f"{_PROVIDER_UNREACHABLE_MSG} (no cached results found)."
+            return TurnResult(
+                text=text, warnings=warnings, tool_calls_made=0, degraded=True,
+            )
 
-        # Tool-call dispatch loop
-        for _ in range(self.max_tool_rounds):
+        # Tool-call dispatch loop.
+        tool_calls_made = 0
+        rounds_used = 0
+        iterations = 0
+        while rounds_used < self.max_tool_rounds and iterations < _HARD_ITERATION_CAP:
+            iterations += 1
             if not response.tool_calls:
                 break
 
+            round_has_side_effect = False
             for tc in response.tool_calls:
-                result = dispatch_tool_call(tc, self.memory)
+                # Errors are surfaced inside the JSON tool result so the model
+                # can react (registry returns {"error": ...} on failure).
+                result = self.registry.dispatch(tc)
+                tool_calls_made += 1
+                spec = self.registry.get_spec(tc.name)
+                # Unknown tools default to side-effecting (conservative).
+                if spec is None or spec.side_effect:
+                    round_has_side_effect = True
                 messages.append(Message(
                     role="assistant",
                     content=f"[tool_call: {tc.name}({tc.arguments})]",
                 ))
                 messages.append(Message(role="tool", content=result))
 
+            # Read-only rounds (e.g. only recall) don't consume the budget.
+            if round_has_side_effect:
+                rounds_used += 1
+
             try:
-                response = self.provider.complete(
-                    messages, effort=self.effort, tools=tool_specs,
-                )
+                response = self._complete_with_retry(messages, tool_specs)
             except Exception as exc:
-                logger.warning("Follow-up provider call failed: %s", exc)
+                logger.warning("Follow-up provider call failed after retries: %s", exc)
+                warnings.append(_PROVIDER_UNREACHABLE_MSG)
                 break
 
         # Write observations
@@ -119,4 +228,9 @@ class Orchestrator:
                 payload={"record_id": rec.id},
             ))
 
-        return response.text
+        return TurnResult(
+            text=response.text,
+            warnings=warnings,
+            tool_calls_made=tool_calls_made,
+            degraded=False,
+        )

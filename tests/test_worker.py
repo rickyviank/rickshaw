@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
-from rickshaw.memory.embedder import LocalEmbedder
+from rickshaw.memory.embedder import TFIDFEmbedder
 from rickshaw.memory.record import MemoryRecord, MemoryScope
 from rickshaw.memory.service import MemoryService
 from rickshaw.providers.base import (
@@ -72,7 +72,7 @@ def test_queue_dequeue_empty():
 
 
 def test_worker_importance_scoring_with_provider():
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     rec = memory.write("important fact")
     assert rec is not None
     queue = JobQueue()
@@ -88,7 +88,7 @@ def test_worker_importance_scoring_with_provider():
 
 
 def test_worker_importance_scoring_no_provider():
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     rec = memory.write("some fact")
     assert rec is not None
     queue = JobQueue()
@@ -104,12 +104,12 @@ def test_worker_importance_scoring_no_provider():
 
 
 def test_worker_eviction_ttl():
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     old_time = datetime.now(timezone.utc) - timedelta(hours=48)
     rec = MemoryRecord(
         id="old_rec",
         text="expired session record",
-        embedding=LocalEmbedder(dim=32).embed("x"),
+        embedding=TFIDFEmbedder(dim=32).embed("x"),
         scope=MemoryScope.SESSION,
         created_at=old_time,
         last_used_at=old_time,
@@ -125,11 +125,11 @@ def test_worker_eviction_ttl():
 
 
 def test_worker_eviction_superseded():
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     rec = MemoryRecord(
         id="superseded_rec",
         text="old record",
-        embedding=LocalEmbedder(dim=32).embed("x"),
+        embedding=TFIDFEmbedder(dim=32).embed("x"),
         scope=MemoryScope.SESSION,
         superseded_by="new_rec",
     )
@@ -144,7 +144,7 @@ def test_worker_eviction_superseded():
 
 
 def test_worker_compaction():
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     r1 = memory.write("fact A")
     r2 = memory.write("fact B about something else")
     assert r1 is not None and r2 is not None
@@ -163,7 +163,7 @@ def test_worker_compaction():
 
 
 def test_worker_handles_missing_record():
-    memory = MemoryService(embedder=LocalEmbedder(dim=32))
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
     queue = JobQueue()
     queue.enqueue(Job(
         type=JobType.IMPORTANCE_SCORING,

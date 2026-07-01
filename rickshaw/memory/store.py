@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from rickshaw.memory._chroma_index import ChromaVectorIndex
 from rickshaw.memory._math import cosine_similarity
 from rickshaw.memory.record import MemoryRecord, MemoryScope, MemoryType
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS memories (
@@ -38,16 +42,40 @@ def _iso_to_dt(s: str) -> datetime:
 class MemoryStore:
     """SQLite-backed store for MemoryRecords."""
 
-    def __init__(self, db_path: str | Path = ":memory:") -> None:
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        vector_dim: int | None = None,
+        use_vector_index: bool = True,
+    ) -> None:
         self._conn = sqlite3.connect(str(db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(_SCHEMA)
         self._conn.commit()
 
+        # Optional indexed vector search via ChromaDB. SQLite stays the source
+        # of truth; the index mirrors embeddings for KNN. Falls back to a
+        # brute-force cosine scan when ChromaDB is unavailable (see
+        # _chroma_index).
+        self._vector_dim = vector_dim
+        self._index: ChromaVectorIndex | None = None
+        if use_vector_index and vector_dim:
+            index = ChromaVectorIndex(db_path, vector_dim)
+            if index.enabled:
+                self._index = index
+
+    @property
+    def vector_search_enabled(self) -> bool:
+        """Whether the ChromaDB-backed vector index is active."""
+        return self._index is not None
+
     def close(self) -> None:
         self._conn.close()
 
     def put(self, record: MemoryRecord) -> None:
+        # embedding is stored as JSON text for reconstruction and the
+        # brute-force fallback; the ChromaDB index (when active) additionally
+        # mirrors the raw vector for indexed KNN search.
         self._conn.execute(
             """INSERT OR REPLACE INTO memories
                (id, text, embedding, scope, type, importance,
@@ -68,6 +96,8 @@ class MemoryStore:
             ),
         )
         self._conn.commit()
+        if self._index is not None:
+            self._index.upsert(record)
 
     def get(self, record_id: str) -> MemoryRecord | None:
         row = self._conn.execute(
@@ -83,11 +113,47 @@ class MemoryStore:
         scope_filter: list[MemoryScope] | None = None,
         limit: int = 20,
     ) -> list[tuple[MemoryRecord, float]]:
-        """Return records ranked by cosine similarity, with optional scope filter.
+        """Return records ranked by similarity, with optional scope filter.
 
-        Metadata scope filter is applied FIRST in SQL, then brute-force
-        cosine similarity over candidate rows.
+        The metadata scope filter is applied FIRST. When the ChromaDB index is
+        active the ranked KNN search runs inside Chroma (scope-filtered via
+        metadata); otherwise we fall back to a brute-force cosine scan over the
+        scope-filtered candidate rows.
         """
+        if self._index is not None:
+            try:
+                return self._search_vector_index(query_vec, scope_filter, limit)
+            except Exception as exc:
+                logger.warning(
+                    "ChromaDB search failed (%s); "
+                    "falling back to brute-force cosine scan.",
+                    exc,
+                )
+        return self._search_bruteforce(query_vec, scope_filter, limit)
+
+    def _search_vector_index(
+        self,
+        query_vec: list[float],
+        scope_filter: list[MemoryScope] | None,
+        limit: int,
+    ) -> list[tuple[MemoryRecord, float]]:
+        """KNN search via ChromaDB; full records are re-hydrated from SQLite."""
+        hits = self._index.query(query_vec, scope_filter, limit)
+        scored: list[tuple[MemoryRecord, float]] = []
+        for record_id, sim in hits:
+            record = self.get(record_id)
+            if record is None or record.superseded_by is not None:
+                continue
+            scored.append((record, sim))
+        return scored
+
+    def _search_bruteforce(
+        self,
+        query_vec: list[float],
+        scope_filter: list[MemoryScope] | None,
+        limit: int,
+    ) -> list[tuple[MemoryRecord, float]]:
+        """Scope-filter in SQL, then brute-force cosine over candidate rows."""
         if scope_filter:
             placeholders = ",".join("?" for _ in scope_filter)
             query = (
@@ -120,6 +186,9 @@ class MemoryStore:
             (superseded_by, record_id),
         )
         self._conn.commit()
+        # Superseded records must not surface in search — drop from the index.
+        if self._index is not None:
+            self._index.delete(record_id)
 
     def all_records(
         self, scope_filter: list[MemoryScope] | None = None,
@@ -139,6 +208,8 @@ class MemoryStore:
             "DELETE FROM memories WHERE id = ?", (record_id,)
         )
         self._conn.commit()
+        if self._index is not None:
+            self._index.delete(record_id)
         return cursor.rowcount > 0
 
     @staticmethod

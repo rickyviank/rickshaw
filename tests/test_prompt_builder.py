@@ -1,4 +1,8 @@
-"""Tests for the prompt builder — token budget and sensitive-record stripping."""
+"""Tests for the prompt builder — token budget enforcement.
+
+Sensitive-record filtering now lives in MemoryService.assemble_context (see
+test_memory.py); the builder only enforces the token budget.
+"""
 
 from __future__ import annotations
 
@@ -36,11 +40,16 @@ def test_build_includes_context():
     assert "fact one" in messages[1].content
 
 
-def test_build_strips_sensitive_records():
+def test_build_serializes_all_provided_records():
+    """The builder serializes whatever records it receives (filtering is upstream).
+
+    Records reaching the builder are already non-sensitive because
+    MemoryService.assemble_context excludes sensitive ones before ranking.
+    """
     builder = PromptBuilder(max_tokens=8000)
     ctx = [
-        MemoryRecord(text="public info", sensitive=False),
-        MemoryRecord(text="SECRET password=abc123", sensitive=True),
+        MemoryRecord(text="public info one", sensitive=False),
+        MemoryRecord(text="public info two", sensitive=False),
     ]
     messages = builder.build(
         system="System",
@@ -49,8 +58,8 @@ def test_build_strips_sensitive_records():
         task_input="Query",
     )
     all_content = " ".join(m.content for m in messages)
-    assert "public info" in all_content
-    assert "SECRET" not in all_content
+    assert "public info one" in all_content
+    assert "public info two" in all_content
 
 
 def test_build_respects_token_budget():
