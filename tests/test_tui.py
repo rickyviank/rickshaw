@@ -263,13 +263,13 @@ async def test_app_settings_command_read_only():
             for w in app.query_one("#transcript").query("Static")
         )
         assert "Settings" in rendered
-        assert "engine" in rendered
-        assert "/engine" in rendered
+        assert "provider" in rendered
+        assert "/provider" in rendered
 
 
 @pytest.mark.asyncio
-async def test_app_engine_list_shows_providers():
-    """``/engine`` (no arg) lists available engines."""
+async def test_app_provider_list_shows_providers():
+    """``/provider`` (no arg) lists available providers."""
     pytest.importorskip("textual")
     orch, provider, _memory = _make_orchestrator()
     cfg = RickshawConfig()
@@ -280,21 +280,21 @@ async def test_app_engine_list_shows_providers():
     app = tui.make_app(orch, provider, Effort.MEDIUM, cfg=cfg)
 
     async with app.run_test() as pilot:
-        app.query_one("#prompt").value = "/engine"
+        app.query_one("#prompt").value = "/provider"
         await pilot.press("enter")
         await pilot.pause()
         rendered = " ".join(
             str(w.render())
             for w in app.query_one("#transcript").query("Static")
         )
-        assert "available engines" in rendered
+        assert "available providers" in rendered
         assert "fake" in rendered
         assert "FAKE_KEY" in rendered
 
 
 @pytest.mark.asyncio
-async def test_app_engine_add_registers_provider():
-    """``/engine add`` wizard registers a new engine in cfg.providers."""
+async def test_app_provider_add_registers_provider():
+    """``/provider add`` wizard registers a new provider in cfg.providers."""
     pytest.importorskip("textual")
     orch, provider, _memory = _make_orchestrator()
     cfg = RickshawConfig()
@@ -306,7 +306,7 @@ async def test_app_engine_add_registers_provider():
 
     async with app.run_test() as pilot:
         prompt = app.query_one("#prompt")
-        prompt.value = "/engine add"
+        prompt.value = "/provider add"
         await pilot.press("enter")
         await pilot.pause()
 
@@ -326,7 +326,7 @@ async def test_app_engine_add_registers_provider():
             str(w.render())
             for w in app.query_one("#transcript").query("Static")
         )
-        assert "engine registered" in rendered
+        assert "provider registered" in rendered
 
 
 @pytest.mark.asyncio
@@ -539,8 +539,8 @@ async def test_app_clear_command():
 
 
 @pytest.mark.asyncio
-async def test_app_help_lists_engine_command():
-    """``/help`` includes the /engine command."""
+async def test_app_help_lists_provider_command():
+    """``/help`` includes the /provider command."""
     pytest.importorskip("textual")
     orch, provider, _memory = _make_orchestrator()
     app = tui.make_app(orch, provider, Effort.MEDIUM)
@@ -553,5 +553,28 @@ async def test_app_help_lists_engine_command():
             str(w.render())
             for w in app.query_one("#transcript").query("Static")
         )
-        assert "/engine" in rendered
+        assert "/provider" in rendered
         assert "/settings" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_engine_alias_still_works():
+    """``/engine`` still works as a deprecated alias for ``/provider``."""
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    cfg = RickshawConfig()
+    cfg.providers["fake"] = ProviderProfile(
+        base_url="", model="fake-model",
+        api_key_env="FAKE_KEY", wire_format="openai",
+    )
+    app = tui.make_app(orch, provider, Effort.MEDIUM, cfg=cfg)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/engine"
+        await pilot.press("enter")
+        await pilot.pause()
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "available providers" in rendered

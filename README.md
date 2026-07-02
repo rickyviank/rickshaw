@@ -92,39 +92,41 @@ surfaced.
   follow-up — the provider's `stream()` doesn't yet parse tool calls.)
 - **Memory** persists to a local SQLite file (`--db-path`, default
   `rickshaw_memory.db`) so context carries across sessions.
-- **Slash-commands:** `/help`, `/status` (engine · model · effort), `/settings`
-  (show current settings), `/engine [name|add]` (list, switch, or register an
-  engine), `/clear`, `/effort <level>`, `/model [name]`, `/memory`, `/quit`.
+- **Slash-commands:** `/help`, `/status` (provider · model · effort), `/settings`
+  (show current settings), `/provider [name|add]` (list, switch, or register a
+  provider), `/clear`, `/effort <level>`, `/model [name]`, `/memory`, `/quit`.
+  `/engine` is still accepted as a deprecated alias for `/provider`.
   Type `/` for inline autocomplete.
 - **Keys:** `Esc` interrupts an in-flight turn, `Ctrl+L` clears the transcript,
   `Ctrl+C` quits.
 
-### `/settings` and `/engine` commands
+### `/settings` and `/provider` commands
 
 Type `/settings` inside the TUI to display current settings (read-only):
 
 ```
 Settings
 ────────────────────────────────────────────
-  engine           openai
+  provider         openai
   model            gpt-4o
   effort           medium
   embedding        openai / text-embedding-3-small
 
   Use:
-    /engine <name>            switch engine
-    /engine                   list available engines
+    /provider <name>          switch provider
+    /provider                 list available providers
     /model <name>             switch chat model
     /effort <low|medium|high> set reasoning effort
-    /engine add               register a custom engine
+    /provider add             register a custom provider
 ────────────────────────────────────────────
 ```
 
-Use `/engine` to list available engines, `/engine <name>` to switch, or
-`/engine add` to register a custom OpenAI-compatible endpoint step by step.
+Use `/provider` to list available providers, `/provider <name>` to switch, or
+`/provider add` to register a custom OpenAI-compatible endpoint step by step.
+The deprecated `/engine` alias still works for backward compatibility.
 Changes are saved to `~/.rickshaw/settings.json` and take effect immediately.
 
-If you switch to an engine that does not support the current effort level,
+If you switch to a provider that does not support the current effort level,
 effort is automatically reset to `medium` and a warning is shown.
 
 ### Persistent settings (`~/.rickshaw/settings.json`)
