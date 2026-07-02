@@ -1,16 +1,19 @@
-"""Tests for CLI argument parsing and effort handling."""
+"""Tests for CLI argument parsing, effort handling, and the unified entry point.
+
+After unification, the ``rickshaw`` console script points at
+:func:`rickshaw.tui.main`.  ``rickshaw.cli`` still exports ``_parse_args``,
+``_build_provider``, ``_EFFORT_NAMES``, and ``load_config`` for backward
+compatibility.
+"""
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from rickshaw.cli import _parse_args, main
+from rickshaw.cli import _parse_args, _build_provider, _EFFORT_NAMES
 from rickshaw.providers.base import (
     Capabilities,
     Effort,
-    Message,
-    Response,
-    TokenUsage,
 )
 
 
@@ -36,12 +39,19 @@ def test_parse_defaults():
     assert args.validate_only is False
 
 
-@patch("rickshaw.cli._run_repl")
-@patch("rickshaw.cli._build_provider")
-@patch("rickshaw.cli.load_config")
-def test_main_passes_effort_to_repl(mock_config, mock_build, mock_repl):
-    """--effort flag is resolved and passed to _run_repl."""
+def test_effort_names_mapping():
+    assert _EFFORT_NAMES["low"] == Effort.LOW
+    assert _EFFORT_NAMES["medium"] == Effort.MEDIUM
+    assert _EFFORT_NAMES["high"] == Effort.HIGH
+
+
+@patch("rickshaw.tui._run_app")
+@patch("rickshaw.tui._build_provider")
+@patch("rickshaw.tui.load_config")
+def test_main_passes_effort_to_tui(mock_config, mock_build, mock_run):
+    """--effort flag is resolved and passed to _run_app."""
     from rickshaw.config import RickshawConfig
+    from rickshaw.tui import main
 
     mock_config.return_value = RickshawConfig()
     provider = MagicMock()
@@ -50,17 +60,18 @@ def test_main_passes_effort_to_repl(mock_config, mock_build, mock_repl):
     provider.capabilities.return_value = Capabilities(effort_levels=list(Effort))
     mock_build.return_value = provider
 
-    main(["--effort", "high"])
+    main(["--effort", "high", "--db-path", ":memory:"])
 
-    mock_repl.assert_called_once()
-    _, call_effort = mock_repl.call_args[0]
+    mock_run.assert_called_once()
+    _, _, call_effort, _ = mock_run.call_args[0]
     assert call_effort == Effort.HIGH
 
 
-@patch("rickshaw.cli._build_provider")
-@patch("rickshaw.cli.load_config")
+@patch("rickshaw.tui._build_provider")
+@patch("rickshaw.tui.load_config")
 def test_main_validate_only_success(mock_config, mock_build, capsys):
     from rickshaw.config import RickshawConfig
+    from rickshaw.tui import main
 
     mock_config.return_value = RickshawConfig()
     provider = MagicMock()
@@ -74,10 +85,11 @@ def test_main_validate_only_success(mock_config, mock_build, capsys):
     assert "validated successfully" in captured.out
 
 
-@patch("rickshaw.cli._build_provider")
-@patch("rickshaw.cli.load_config")
+@patch("rickshaw.tui._build_provider")
+@patch("rickshaw.tui.load_config")
 def test_main_validate_only_failure(mock_config, mock_build):
     from rickshaw.config import RickshawConfig
+    from rickshaw.tui import main
 
     mock_config.return_value = RickshawConfig()
     provider = MagicMock()

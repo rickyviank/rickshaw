@@ -24,6 +24,9 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
+Textual and Rich are included as hard dependencies — no extra install step
+is needed for the terminal UI.
+
 ### Required environment variables
 
 | Variable | Required | Description |
@@ -58,8 +61,10 @@ register("my_llm", MyLLMProvider)
 
 ## Usage
 
+The single `rickshaw` command launches a full-screen Textual TUI:
+
 ```bash
-# Interactive REPL
+# Launch the TUI
 rickshaw --provider openai --effort high
 
 # Or via python -m
@@ -69,7 +74,7 @@ python -m rickshaw --provider openai
 rickshaw --provider openai --validate-only
 ```
 
-### Terminal UI (`rickshaw-tui`)
+### Terminal UI
 
 A deliberately minimalist full-screen terminal UI (built on
 [Textual](https://textual.textualize.io/)), in the spirit of Claude Code /
@@ -81,25 +86,56 @@ is routed through the `Orchestrator`, so the semantic memory layer
 (`remember`/`recall`/`forget`) and graceful-degradation info are active and
 surfaced.
 
-```bash
-# Install the optional extra (adds Textual + Rich)
-pip install -e ".[tui]"
-
-# Launch it
-rickshaw-tui --provider openai --effort high
-```
-
 - **Streaming:** when the provider supports it *and* isn't advertising tools,
   replies stream token by token; otherwise the final answer is rendered once
   generation completes. (Streaming through the tool-call loop is a provider-side
   follow-up — the provider's `stream()` doesn't yet parse tool calls.)
 - **Memory** persists to a local SQLite file (`--db-path`, default
   `rickshaw_memory.db`) so context carries across sessions.
-- **Slash-commands:** `/help`, `/status` (provider · model · effort), `/clear`,
-  `/effort <level>`, `/model [name]`, `/memory`, `/quit`. Type `/` for inline
-  autocomplete.
+- **Slash-commands:** `/help`, `/status` (provider · model · effort), `/settings`
+  (open settings panel), `/clear`, `/effort <level>`, `/model [name]`, `/memory`,
+  `/quit`. Type `/` for inline autocomplete.
 - **Keys:** `Esc` interrupts an in-flight turn, `Ctrl+L` clears the transcript,
   `Ctrl+C` quits.
+
+### `/settings` command
+
+Type `/settings` inside the TUI to open the settings panel:
+
+- **Basic scope:** choose the active provider, chat model, and effort level.
+- **Advanced scope:** add or edit a custom provider (name, base URL, API key
+  env var, wire format), plus set the embedding provider and embedding model.
+
+Changes are saved to `~/.rickshaw/settings.json` and take effect immediately.
+
+### Persistent settings (`~/.rickshaw/settings.json`)
+
+Rickshaw persists user preferences in `~/.rickshaw/settings.json`.  The file is
+created with defaults on first launch.  Schema:
+
+```json
+{
+  "version": 1,
+  "provider": "openai",
+  "effort": "medium",
+  "embedding_provider": "openai",
+  "embedding_model": "text-embedding-3-small",
+  "providers": {
+    "deepseek": {
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "wire_format": "openai"
+    }
+  }
+}
+```
+
+Resolution order (later wins): `config.yaml` → `~/.rickshaw/settings.json` →
+environment variables.
+
+**API keys are never written to disk.**  Only the *name* of the environment
+variable holding the key (`api_key_env`) is stored in the settings file.
 
 ### Effort levels
 
@@ -259,7 +295,6 @@ pip install -e ".[vector]"   # installs chromadb
 
 | Extra | Install | Purpose |
 |---|---|---|
-| `tui` | `pip install -e ".[tui]"` | Full-screen terminal UI (`rickshaw-tui`, built on Textual). |
 | `vector` | `pip install -e ".[vector]"` | Indexed KNN search via ChromaDB (brute-force fallback otherwise). |
 | `schema` | `pip install -e ".[schema]"` | JSON-schema validation of tool-call arguments. |
 | `dev` | `pip install -e ".[dev]"` | Test toolchain (pytest, respx). |

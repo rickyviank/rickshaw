@@ -94,11 +94,13 @@ def test_module_imports_without_textual():
     assert "your driver, your memory" in tui.RICKSHAW_BANNER
 
 
-def test_cli_reuses_branding_constants():
-    """cli._print_header pulls the same constants from tui (lazy import)."""
+def test_cli_exports_preserved():
+    """cli still exports the symbols tui.py imports."""
     from rickshaw import cli
 
-    cli._print_header(_FakeProvider(), Effort.MEDIUM)
+    assert hasattr(cli, "_EFFORT_NAMES")
+    assert hasattr(cli, "_build_provider")
+    assert hasattr(cli, "load_config")
 
 
 def test_parse_args_defaults_and_overrides():

@@ -13,6 +13,8 @@ dependencies = [
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.1",
+    "textual>=0.50",
+    "rich>=13.0",
 ]
 
 [project.optional-dependencies]
@@ -30,16 +32,11 @@ vector = [
 schema = [
     "jsonschema>=4.0.0",
 ]
-# Optional: full-screen terminal UI (rickshaw-tui), built on Textual.
-# Textual depends on Rich, so both are available with this extra.
-tui = [
-    "textual>=0.50",
-    "rich>=13.0",
-]
+# Kept for backward compatibility; Textual and Rich are now hard dependencies.
+tui = []
 
 [project.scripts]
-rickshaw = "rickshaw.cli:main"
-rickshaw-tui = "rickshaw.tui:main"
+rickshaw = "rickshaw.tui:main"
 
 [tool.setuptools.packages.find]
 include = ["rickshaw*"]

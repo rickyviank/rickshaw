@@ -7,16 +7,12 @@ autocomplete. Every turn is routed through :meth:`Orchestrator.run_turn`, so the
 semantic memory layer (remember / recall / forget) and graceful-degradation info
 are active and surfaced.
 
-Textual is an optional dependency. Install the extra to use the UI::
+Launch::
 
-    pip install -e ".[tui]"
-
-then launch::
-
-    rickshaw-tui --provider openai --effort high
+    rickshaw --provider openai --effort high
 
 The module itself (and the branding constants below) import fine without Textual
-installed — the framework is imported lazily, only when the app is built.
+installed -- the framework is imported lazily, only when the app is built.
 """
 
 from __future__ import annotations
@@ -25,11 +21,13 @@ import argparse
 import sys
 
 from rickshaw.cli import _EFFORT_NAMES, _build_provider, load_config
-from rickshaw.config import RickshawConfig
+from rickshaw.config import ProviderProfile, RickshawConfig
 from rickshaw.memory.service import MemoryService
 from rickshaw.orchestrator import Orchestrator
 from rickshaw.providers.base import Effort, LLMProvider
+from rickshaw.providers.build import build_provider_from_profile
 from rickshaw.providers.factory import get_provider
+from rickshaw.settings import load_settings, save_settings
 
 # Branding — module-level so cli.py can import and reuse them.
 RICKSHAW_LOGO = "o--o  rickshaw"
@@ -43,9 +41,10 @@ _DEFAULT_DB_PATH = "rickshaw_memory.db"
 _COMMANDS = {
     "/help": "Show this help.",
     "/status": "Show provider, model, and effort.",
+    "/settings": "Open the settings panel.",
     "/clear": "Clear the transcript.",
-    "/effort": "/effort <low|medium|high> — set reasoning effort.",
-    "/model": "/model [name] — show or switch the chat model.",
+    "/effort": "/effort <low|medium|high> -- set reasoning effort.",
+    "/model": "/model [name] -- show or switch the chat model.",
     "/memory": "List recently stored memories.",
     "/quit": "Exit.",
     "/exit": "Exit.",
@@ -56,15 +55,15 @@ _USER_MARK = "[#d98a3d]\u203a[/]"  # amber angle-quote before each user message
 
 _TEXTUAL_MISSING_MSG = (
     "The Rickshaw terminal UI requires Textual, which is not installed.\n"
-    "Install the optional extra with:\n\n"
-    '    pip install "rickshaw[tui]"\n'
+    "Install it with:\n\n"
+    '    pip install "rickshaw"\n'
 )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="rickshaw-tui",
-        description="Full-screen terminal UI for the Rickshaw provider harness.",
+        prog="rickshaw",
+        description="Multi-LLM provider harness with effort levels.",
     )
     parser.add_argument(
         "--provider",
@@ -85,20 +84,32 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"(default: {_DEFAULT_DB_PATH})."
         ),
     )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Validate provider connectivity and exit.",
+    )
     return parser.parse_args(argv)
 
 
 def _rebuild_provider(name: str, cfg: RickshawConfig, model: str) -> LLMProvider:
-    """Build a provider with a model override (used by /model)."""
-    if name == "openai":
-        return get_provider(
-            "openai",
-            api_key=cfg.openai_api_key,
-            base_url=cfg.openai_base_url,
+    """Build a provider with a model override (used by /model and /settings).
+
+    Works for any provider whose profile has ``wire_format == 'openai'``,
+    ``'anthropic'``, or ``'devin'``.
+    """
+    profile = cfg.providers.get(name)
+    if profile is not None:
+        overridden = ProviderProfile(
+            base_url=profile.base_url,
             model=model,
-            embedding_model=cfg.openai_embedding_model,
+            api_key_env=profile.api_key_env,
+            wire_format=profile.wire_format,
         )
-    raise ValueError(f"switching models is not supported for provider {name!r}")
+        return build_provider_from_profile(
+            name, overridden, embedding_model=cfg.openai_embedding_model,
+        )
+    raise ValueError(f"no profile found for provider {name!r}")
 
 
 def make_app(
@@ -116,13 +127,173 @@ def make_app(
         from textual import work
         from textual.app import App, ComposeResult
         from textual.binding import Binding
-        from textual.containers import VerticalScroll
+        from textual.containers import Vertical, VerticalScroll
+        from textual.screen import ModalScreen
         from textual.suggester import SuggestFromList
-        from textual.widgets import Input, Markdown, Rule, Static
+        from textual.widgets import (
+            Button,
+            Input,
+            Label,
+            Markdown,
+            Rule,
+            Select,
+            Static,
+        )
     except ImportError as exc:  # pragma: no cover - exercised via message text
         raise SystemExit(_TEXTUAL_MISSING_MSG) from exc
 
     cfg = cfg or RickshawConfig()
+
+    # ---- Settings modal screen -----------------------------------------
+
+    class SettingsScreen(ModalScreen):
+        """Modal for viewing / editing runtime settings."""
+
+        CSS = """
+        SettingsScreen { align: center middle; }
+        #settings-container {
+            width: 70;
+            max-height: 36;
+            background: #1a1b1e;
+            border: solid #3a3f47;
+            padding: 1 2;
+        }
+        #settings-container Label { margin: 1 0 0 0; color: #9aa0a8; }
+        #settings-container Select { margin: 0 0 1 0; }
+        #settings-container Input { margin: 0 0 1 0; }
+        #settings-container Button { margin: 1 1 0 0; }
+        .section-title { color: #d98a3d; text-style: bold; margin: 1 0 0 0; }
+        """
+
+        BINDINGS = [
+            Binding("escape", "dismiss_settings", "Close", show=False),
+        ]
+
+        def __init__(self, app_cfg: RickshawConfig) -> None:
+            super().__init__()
+            self._cfg = app_cfg
+            self._advanced = False
+
+        def compose(self) -> ComposeResult:
+            provider_choices = [
+                (name, name) for name in sorted(self._cfg.providers)
+            ]
+            settings = load_settings()
+            current_provider = settings.get("provider", self._cfg.provider)
+            current_effort = settings.get("effort", self._cfg.effort.value)
+            effort_choices = [
+                ("low", "low"), ("medium", "medium"), ("high", "high"),
+            ]
+            current_emb_provider = settings.get(
+                "embedding_provider", self._cfg.embedding_provider or "openai",
+            )
+            current_emb_model = settings.get(
+                "embedding_model", self._cfg.openai_embedding_model,
+            )
+
+            with Vertical(id="settings-container"):
+                yield Label("Settings", classes="section-title")
+
+                yield Label("Provider")
+                yield Select(
+                    provider_choices,
+                    value=current_provider,
+                    id="sel-provider",
+                )
+
+                yield Label("Chat model")
+                profile = self._cfg.providers.get(current_provider)
+                default_model = profile.model if profile else ""
+                yield Input(
+                    value=default_model,
+                    placeholder="model name",
+                    id="inp-model",
+                )
+
+                yield Label("Effort")
+                yield Select(
+                    effort_choices,
+                    value=current_effort,
+                    id="sel-effort",
+                )
+
+                # Advanced section (always rendered, toggled by button)
+                yield Label("Advanced", classes="section-title", id="lbl-advanced")
+
+                yield Label("Add / edit provider", id="lbl-adv-header")
+                yield Label("Name", id="lbl-adv-name")
+                yield Input(placeholder="e.g. deepseek", id="inp-adv-name")
+                yield Label("Base URL", id="lbl-adv-url")
+                yield Input(placeholder="https://...", id="inp-adv-url")
+                yield Label("API key env var", id="lbl-adv-key")
+                yield Input(placeholder="DEEPSEEK_API_KEY", id="inp-adv-key")
+                yield Label("Wire format", id="lbl-adv-wire")
+                yield Select(
+                    [("openai", "openai"), ("anthropic", "anthropic"), ("devin", "devin")],
+                    value="openai",
+                    id="sel-adv-wire",
+                )
+
+                yield Label("Embedding provider", id="lbl-emb-provider")
+                yield Input(
+                    value=current_emb_provider,
+                    placeholder="openai",
+                    id="inp-emb-provider",
+                )
+                yield Label("Embedding model", id="lbl-emb-model")
+                yield Input(
+                    value=current_emb_model,
+                    placeholder="text-embedding-3-small",
+                    id="inp-emb-model",
+                )
+
+                yield Button("Save", variant="primary", id="btn-save")
+                yield Button("Cancel", id="btn-cancel")
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "btn-cancel":
+                self.dismiss(None)
+                return
+            if event.button.id == "btn-save":
+                result = self._collect()
+                self.dismiss(result)
+
+        def _collect(self) -> dict:
+            data: dict = {}
+            data["provider"] = self.query_one("#sel-provider", Select).value
+            data["model"] = self.query_one("#inp-model", Input).value.strip()
+            data["effort"] = self.query_one("#sel-effort", Select).value
+            data["embedding_provider"] = self.query_one(
+                "#inp-emb-provider", Input
+            ).value.strip()
+            data["embedding_model"] = self.query_one(
+                "#inp-emb-model", Input
+            ).value.strip()
+
+            adv_name = self.query_one("#inp-adv-name", Input).value.strip()
+            adv_url = self.query_one("#inp-adv-url", Input).value.strip()
+            adv_key = self.query_one("#inp-adv-key", Input).value.strip()
+            adv_wire = self.query_one("#sel-adv-wire", Select).value
+            if adv_name and adv_url and adv_key:
+                data["new_provider"] = {
+                    "name": adv_name,
+                    "base_url": adv_url,
+                    "api_key_env": adv_key,
+                    "wire_format": adv_wire,
+                    "model": data.get("model", ""),
+                }
+            return data
+
+        def on_select_changed(self, event: Select.Changed) -> None:
+            if event.select.id == "sel-provider":
+                profile = self._cfg.providers.get(str(event.value))
+                if profile:
+                    self.query_one("#inp-model", Input).value = profile.model
+
+        def action_dismiss_settings(self) -> None:
+            self.dismiss(None)
+
+    # ---- Main TUI app --------------------------------------------------
 
     class RickshawTUI(App):
         """Textual application driving turns through the Orchestrator."""
@@ -264,6 +435,8 @@ def make_app(
                 self._cmd_effort(arg)
             elif cmd == "/model":
                 self._cmd_model(arg)
+            elif cmd == "/settings":
+                self._cmd_settings()
             elif cmd == "/memory":
                 self._cmd_memory()
             else:
@@ -327,6 +500,67 @@ def make_app(
             for rec in records[-10:]:
                 snippet = rec.text if len(rec.text) <= 100 else rec.text[:97] + "…"
                 self._write(f"  {snippet}", "meta")
+
+        def _cmd_settings(self) -> None:
+            self.push_screen(SettingsScreen(self.cfg), callback=self._on_settings_dismiss)
+
+        def _on_settings_dismiss(self, result) -> None:
+            if result is None:
+                return
+            settings = load_settings()
+
+            # Handle new custom provider
+            new_prov = result.pop("new_provider", None)
+            if new_prov:
+                name = new_prov.pop("name")
+                settings.setdefault("providers", {})[name] = new_prov
+                self.cfg.providers[name] = ProviderProfile(
+                    base_url=new_prov["base_url"],
+                    model=new_prov.get("model", ""),
+                    api_key_env=new_prov["api_key_env"],
+                    wire_format=new_prov.get("wire_format", "openai"),
+                )
+
+            chosen_provider = result.get("provider", self.cfg.provider)
+            chosen_model = result.get("model", "")
+            chosen_effort = result.get("effort", self.orchestrator.effort.value)
+            emb_provider = result.get("embedding_provider", "")
+            emb_model = result.get("embedding_model", "")
+
+            settings["provider"] = chosen_provider
+            settings["effort"] = chosen_effort
+            settings["embedding_provider"] = emb_provider
+            settings["embedding_model"] = emb_model
+            save_settings(settings)
+
+            # Rebuild provider
+            try:
+                profile = self.cfg.providers.get(chosen_provider)
+                if profile and chosen_model:
+                    overridden = ProviderProfile(
+                        base_url=profile.base_url,
+                        model=chosen_model,
+                        api_key_env=profile.api_key_env,
+                        wire_format=profile.wire_format,
+                    )
+                    new_provider = build_provider_from_profile(
+                        chosen_provider, overridden,
+                        embedding_model=emb_model or self.cfg.openai_embedding_model,
+                    )
+                else:
+                    new_provider = _build_provider(chosen_provider, self.cfg)
+                self.provider = new_provider
+                self.orchestrator.provider = new_provider
+            except Exception as exc:
+                self._write(f"Could not switch provider: {exc}", "warn")
+
+            # Update effort
+            if chosen_effort in _EFFORT_NAMES:
+                self.orchestrator.effort = _EFFORT_NAMES[chosen_effort]
+                self.effort = _EFFORT_NAMES[chosen_effort]
+
+            self._cmd_status()
+            self._write("settings saved.", "meta")
 
         # ---- turn execution --------------------------------------------
 
@@ -431,7 +665,13 @@ def main(argv: list[str] | None = None) -> None:
         provider.validate()
     except Exception as exc:
         print(f"Provider validation failed ({provider_name}): {exc}", file=sys.stderr)
+        if args.validate_only:
+            sys.exit(1)
         print("Continuing anyway; calls may fail.\n", file=sys.stderr)
+
+    if args.validate_only:
+        print(f"Provider {provider_name!r} validated successfully.")
+        return
 
     memory = MemoryService(db_path=args.db_path)
     orchestrator = Orchestrator(provider=provider, memory=memory, effort=effort)
