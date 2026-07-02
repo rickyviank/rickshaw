@@ -1,5 +1,5 @@
 """Allow ``python -m rickshaw``."""
 
-from rickshaw.cli import main
+from rickshaw.tui import main
 
 main()

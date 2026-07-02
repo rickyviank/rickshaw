@@ -15,6 +15,7 @@ import pytest
 from rickshaw.memory.embedder import TFIDFEmbedder
 from rickshaw.memory.service import MemoryService
 from rickshaw.orchestrator import Orchestrator
+from rickshaw.config import ProviderProfile, RickshawConfig
 from rickshaw.providers.base import (
     Capabilities,
     Effort,
@@ -94,11 +95,13 @@ def test_module_imports_without_textual():
     assert "your driver, your memory" in tui.RICKSHAW_BANNER
 
 
-def test_cli_reuses_branding_constants():
-    """cli._print_header pulls the same constants from tui (lazy import)."""
+def test_cli_exports_preserved():
+    """cli still exports the symbols tui.py imports."""
     from rickshaw import cli
 
-    cli._print_header(_FakeProvider(), Effort.MEDIUM)
+    assert hasattr(cli, "_EFFORT_NAMES")
+    assert hasattr(cli, "_build_provider")
+    assert hasattr(cli, "load_config")
 
 
 def test_parse_args_defaults_and_overrides():
@@ -245,6 +248,120 @@ async def test_app_effort_command_updates_orchestrator():
 
 
 @pytest.mark.asyncio
+async def test_app_settings_command_read_only():
+    """``/settings`` prints an inline display without opening a modal."""
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/settings"
+        await pilot.press("enter")
+        await pilot.pause()
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "Settings" in rendered
+        assert "engine" in rendered
+        assert "/engine" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_engine_list_shows_providers():
+    """``/engine`` (no arg) lists available engines."""
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    cfg = RickshawConfig()
+    cfg.providers["fake"] = ProviderProfile(
+        base_url="", model="fake-model",
+        api_key_env="FAKE_KEY", wire_format="openai",
+    )
+    app = tui.make_app(orch, provider, Effort.MEDIUM, cfg=cfg)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/engine"
+        await pilot.press("enter")
+        await pilot.pause()
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "available engines" in rendered
+        assert "fake" in rendered
+        assert "FAKE_KEY" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_engine_add_registers_provider():
+    """``/engine add`` wizard registers a new engine in cfg.providers."""
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    cfg = RickshawConfig()
+    cfg.providers["fake"] = ProviderProfile(
+        base_url="", model="fake-model",
+        api_key_env="FAKE_KEY", wire_format="openai",
+    )
+    app = tui.make_app(orch, provider, Effort.MEDIUM, cfg=cfg)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt")
+        prompt.value = "/engine add"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        # Step through the wizard: name, base_url, api_key_env, wire_format
+        for val in ["testeng", "https://test.example.com/v1", "TEST_KEY", ""]:
+            prompt.value = val
+            await pilot.press("enter")
+            await pilot.pause()
+
+        assert "testeng" in cfg.providers
+        p = cfg.providers["testeng"]
+        assert p.base_url == "https://test.example.com/v1"
+        assert p.api_key_env == "TEST_KEY"
+        assert p.wire_format == "openai"
+
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "engine registered" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_effort_rejected_when_unsupported():
+    """Effort change is rejected when the provider doesn't support it."""
+    pytest.importorskip("textual")
+
+    class _LimitedProvider(_FakeProvider):
+        def capabilities(self):
+            return Capabilities(
+                streaming=True,
+                function_calling=False,
+                effort_levels=[Effort.LOW, Effort.MEDIUM],
+                max_context_tokens=4096,
+            )
+
+    provider = _LimitedProvider()
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
+    orch = Orchestrator(provider=provider, memory=memory)
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/effort high"
+        await pilot.press("enter")
+        await pilot.pause()
+        # Effort should NOT have changed since HIGH is unsupported.
+        assert orch.effort == Effort.MEDIUM
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "does not support effort high" in rendered
+
+
+@pytest.mark.asyncio
 async def test_app_clear_command():
     pytest.importorskip("textual")
     orch, provider, _memory = _make_orchestrator()
@@ -258,3 +375,22 @@ async def test_app_clear_command():
             str(w.render()) for w in app.query_one("#transcript").query("Static")
         )
         assert "cleared." in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_help_lists_engine_command():
+    """``/help`` includes the /engine command."""
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/help"
+        await pilot.press("enter")
+        await pilot.pause()
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "/engine" in rendered
+        assert "/settings" in rendered
