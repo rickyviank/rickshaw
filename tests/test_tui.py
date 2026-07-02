@@ -362,6 +362,167 @@ async def test_app_effort_rejected_when_unsupported():
 
 
 @pytest.mark.asyncio
+async def test_app_model_list_shows_available_models():
+    """Bare ``/model`` lists the current provider's available_models()."""
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    cfg = RickshawConfig()
+    cfg.providers["fake"] = ProviderProfile(
+        base_url="", model="fake-model",
+        api_key_env="FAKE_KEY", wire_format="openai",
+    )
+    app = tui.make_app(orch, provider, Effort.MEDIUM, cfg=cfg)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/model"
+        await pilot.press("enter")
+        await pilot.pause()
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "available models" in rendered
+        assert "fake-model" in rendered
+        assert "♦" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_model_rejects_unknown_model():
+    """``/model bad-name`` is rejected with valid options listed."""
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    cfg = RickshawConfig()
+    cfg.providers["fake"] = ProviderProfile(
+        base_url="", model="fake-model",
+        api_key_env="FAKE_KEY", wire_format="openai",
+    )
+    app = tui.make_app(orch, provider, Effort.MEDIUM, cfg=cfg)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/model gpt-4o"
+        await pilot.press("enter")
+        await pilot.pause()
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "Unknown model" in rendered
+        assert "fake-model" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_model_scoped_to_active_provider():
+    """Model selection is scoped: can't pick models from another provider."""
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    cfg = RickshawConfig()
+    cfg.providers["fake"] = ProviderProfile(
+        base_url="", model="fake-model",
+        api_key_env="FAKE_KEY", wire_format="openai",
+    )
+    app = tui.make_app(orch, provider, Effort.MEDIUM, cfg=cfg)
+
+    async with app.run_test() as pilot:
+        # Try to select a model that doesn't belong to the fake provider.
+        app.query_one("#prompt").value = "/model claude-3-5-sonnet-latest"
+        await pilot.press("enter")
+        await pilot.pause()
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "Unknown model" in rendered
+        assert "fake-model" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_model_switch_effort_reset():
+    """Effort is reset to medium if unsupported by the new model's provider."""
+    pytest.importorskip("textual")
+
+    class _LimitedModelProvider(_FakeProvider):
+        """Provider that supports two models but no HIGH effort."""
+
+        def available_models(self):
+            return ["fake-model", "fake-model-2"]
+
+        def capabilities(self):
+            return Capabilities(
+                streaming=True,
+                function_calling=False,
+                effort_levels=[Effort.LOW, Effort.MEDIUM],
+                max_context_tokens=4096,
+            )
+
+    provider = _LimitedModelProvider()
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
+    orch = Orchestrator(provider=provider, memory=memory)
+    orch.effort = Effort.HIGH  # Set an unsupported effort level.
+    cfg = RickshawConfig()
+    cfg.providers["fake"] = ProviderProfile(
+        base_url="", model="fake-model",
+        api_key_env="FAKE_KEY", wire_format="openai",
+    )
+    app = tui.make_app(orch, provider, Effort.HIGH, cfg=cfg)
+
+    # Patch _rebuild_provider to return a provider with limited effort.
+    rebuilt = _LimitedModelProvider()
+    rebuilt._model = "fake-model-2"
+    with patch("rickshaw.tui._rebuild_provider", return_value=rebuilt):
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/model fake-model-2"
+            await pilot.press("enter")
+            await pilot.pause()
+            rendered = " ".join(
+                str(w.render())
+                for w in app.query_one("#transcript").query("Static")
+            )
+            assert "Reset to medium" in rendered
+            assert orch.effort == Effort.MEDIUM
+
+
+@pytest.mark.asyncio
+async def test_app_model_offline_error_surfaces_warning():
+    """If available_models() raises, a warning is shown and no switch happens."""
+    pytest.importorskip("textual")
+
+    class _OfflineProvider(_FakeProvider):
+        def available_models(self):
+            raise RuntimeError("offline — no cached model list")
+
+    provider = _OfflineProvider()
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
+    orch = Orchestrator(provider=provider, memory=memory)
+    cfg = RickshawConfig()
+    cfg.providers["fake"] = ProviderProfile(
+        base_url="", model="fake-model",
+        api_key_env="FAKE_KEY", wire_format="openai",
+    )
+    app = tui.make_app(orch, provider, Effort.MEDIUM, cfg=cfg)
+
+    async with app.run_test() as pilot:
+        # Bare /model should warn on error.
+        app.query_one("#prompt").value = "/model"
+        await pilot.press("enter")
+        await pilot.pause()
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "Cannot list models" in rendered
+
+        # /model <name> should also warn on error and not switch.
+        app.query_one("#prompt").value = "/model some-model"
+        await pilot.press("enter")
+        await pilot.pause()
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "Cannot validate model" in rendered
+
+
+@pytest.mark.asyncio
 async def test_app_clear_command():
     pytest.importorskip("textual")
     orch, provider, _memory = _make_orchestrator()

@@ -340,9 +340,39 @@ def make_app(
 
         def _cmd_model(self, arg: str) -> None:
             if not arg:
+                # List the current provider's available models.
                 model = getattr(self.provider, "_model", "") or "(unknown)"
-                self._write(f"Current model: {model}", "meta")
+                self._write(
+                    f"current · {self.provider.name} ({model})", "meta",
+                )
+                self._write("", "meta")
+                try:
+                    models = self.provider.available_models()
+                except Exception as exc:
+                    self._write(f"Cannot list models: {exc}", "warn")
+                    return
+                self._write("  available models:", "meta")
+                for m in models:
+                    marker = "♦" if m == model else " "
+                    self._write(f"    {m:<32} {marker}", "meta")
                 return
+
+            # Strict validation: only allow models from the current provider.
+            try:
+                valid_models = self.provider.available_models()
+            except Exception as exc:
+                self._write(f"Cannot validate model: {exc}", "warn")
+                return
+
+            if arg not in valid_models:
+                display = ", ".join(valid_models)
+                self._write(
+                    f"Unknown model {arg!r} for {self.provider.name}. "
+                    f"Available: {display}",
+                    "warn",
+                )
+                return
+
             try:
                 new_provider = _rebuild_provider(self.provider.name, self.cfg, arg)
             except Exception as exc:
@@ -350,8 +380,23 @@ def make_app(
                 return
             self.provider = new_provider
             self.orchestrator.provider = new_provider
+
+            # Effort reconciliation: reset to medium if unsupported.
+            caps = new_provider.capabilities()
+            old_effort = self.orchestrator.effort
+            if caps.effort_levels and old_effort not in caps.effort_levels:
+                default_effort = Effort.MEDIUM
+                self.orchestrator.effort = default_effort
+                self.effort = default_effort
+                self._write(
+                    f"note: {arg} does not support effort "
+                    f"{old_effort.value}. Reset to medium.",
+                    "warn",
+                )
+
             settings = load_settings()
             settings["model"] = arg
+            settings["effort"] = self.orchestrator.effort.value
             save_settings(settings)
             self._write(f"model · {arg}", "meta")
 
