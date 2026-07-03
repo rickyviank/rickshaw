@@ -7,10 +7,14 @@ need the module to import, which does not require Textual at import time.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Iterator
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs
 
+import httpx
 import pytest
+import respx
 
 from rickshaw.memory.embedder import TFIDFEmbedder
 from rickshaw.memory.service import MemoryService
@@ -116,6 +120,91 @@ def test_parse_args_defaults_and_overrides():
     assert args.provider == "openai"
     assert args.effort == "high"
     assert args.db_path == "x.db"
+
+
+def test_oauth_authorize_url_encoding_and_quirks():
+    anthropic = tui._builtin_provider_info("anthropic")
+    openai = tui._builtin_provider_info("openai")
+    assert anthropic is not None
+    assert openai is not None
+
+    anthro_url = tui._build_authorize_url(
+        anthropic.oauth,
+        state="state123",
+        code_challenge="challenge",
+        extra=tui._oauth_quirk("anthropic")["authorize_extra"],
+    )
+    assert "scope=org%3Acreate_api_key%20user%3Aprofile%20user%3Ainference" in anthro_url
+    assert "code=true" in anthro_url
+    assert " " not in anthro_url
+    assert ":create_api_key" not in anthro_url
+
+    openai_url = tui._build_authorize_url(
+        openai.oauth,
+        state="state123",
+        code_challenge="challenge",
+        extra=tui._oauth_quirk("openai")["authorize_extra"],
+    )
+    assert "scope=openid%20profile%20email%20offline_access" in openai_url
+    assert "code=true" not in openai_url
+    assert " " not in openai_url
+    assert ":openid" not in openai_url
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_oauth_token_exchange_honors_provider_encoding():
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    anthropic_route = respx.post("https://console.anthropic.com/v1/oauth/token").mock(
+        return_value=httpx.Response(
+            200,
+            json={"access_token": "a", "refresh_token": "r", "expires_in": 3600},
+        )
+    )
+    credential = await type(app)._exchange_token(
+        "https://console.anthropic.com/v1/oauth/token",
+        {
+            "grant_type": "authorization_code",
+            "code": "code",
+            "client_id": "client",
+            "redirect_uri": "https://callback",
+            "code_verifier": "verifier",
+            "state": "state",
+        },
+        "json",
+    )
+    assert credential.access == "a"
+    anthro_req = anthropic_route.calls[0].request
+    assert anthro_req.headers["content-type"].startswith("application/json")
+    assert json.loads(anthro_req.content)["state"] == "state"
+
+    openai_route = respx.post("https://auth.openai.com/oauth/token").mock(
+        return_value=httpx.Response(
+            200,
+            json={"access_token": "b", "refresh_token": "r2", "expires_in": 3600},
+        )
+    )
+    credential = await type(app)._exchange_token(
+        "https://auth.openai.com/oauth/token",
+        {
+            "grant_type": "authorization_code",
+            "code": "code",
+            "client_id": "client",
+            "redirect_uri": "https://callback",
+            "code_verifier": "verifier",
+        },
+        "form",
+    )
+    assert credential.access == "b"
+    openai_req = openai_route.calls[0].request
+    assert openai_req.headers["content-type"].startswith(
+        "application/x-www-form-urlencoded"
+    )
+    assert parse_qs(openai_req.content.decode())["code"][0] == "code"
+    assert "state" not in parse_qs(openai_req.content.decode())
 
 
 @patch("rickshaw.tui._build_provider")

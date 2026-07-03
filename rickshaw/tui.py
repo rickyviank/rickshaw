@@ -29,7 +29,7 @@ import logging
 import os
 import sys
 import webbrowser
-from pathlib import Path
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -57,6 +57,19 @@ RICKSHAW_BANNER = f"{RICKSHAW_LOGO} \u00b7 {RICKSHAW_SLOGAN}"
 
 # Where the memory layer persists across sessions (vs. the default ":memory:").
 _DEFAULT_DB_PATH = "rickshaw_memory.db"
+
+_OAUTH_QUIRKS = {
+    "anthropic": {
+        "authorize_extra": {"code": "true"},
+        "token_encoding": "json",
+        "token_include_state": True,
+    }
+}
+_DEFAULT_OAUTH_QUIRK = {
+    "authorize_extra": {},
+    "token_encoding": "form",
+    "token_include_state": False,
+}
 
 # Slash-commands, used for help text and inline autocomplete.
 _COMMANDS = {
@@ -155,6 +168,28 @@ def _builtin_provider_info(provider_id: str):
         if p.id == provider_id:
             return p
     return None
+
+
+def _oauth_quirk(provider_id: str) -> dict[str, object]:
+    quirk = dict(_DEFAULT_OAUTH_QUIRK)
+    quirk.update(_OAUTH_QUIRKS.get(provider_id, {}))
+    return quirk
+
+
+def _build_authorize_url(oauth_cfg, *, state: str, code_challenge: str | None, extra):
+    params = {
+        "response_type": "code",
+        "client_id": oauth_cfg.client_id,
+        "scope": " ".join(oauth_cfg.scopes),
+        "state": state,
+    }
+    if oauth_cfg.redirect_uri:
+        params["redirect_uri"] = oauth_cfg.redirect_uri
+    if code_challenge:
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"
+    params.update(extra)
+    return f"{oauth_cfg.authorize_url}?{urlencode(params, quote_via=quote)}"
 
 
 def make_app(
@@ -880,8 +915,7 @@ def make_app(
         @work(thread=True, exclusive=True, group="login")
         def _run_auth_code_login_start(self, provider_id, models, open_browser):
             """Start auth-code login: build authorize URL and open browser."""
-            import asyncio
-            from rickshaw_ai.auth.oauth import OAuthClient, build_authorize_url, generate_pkce
+            from rickshaw_ai.auth.oauth import generate_pkce
             import base64, os as _os
 
             info = models.provider_info(provider_id)
@@ -890,7 +924,12 @@ def make_app(
             if oauth_cfg.use_pkce:
                 verifier, challenge = generate_pkce()
             state = base64.urlsafe_b64encode(_os.urandom(16)).rstrip(b"=").decode()
-            url = build_authorize_url(oauth_cfg, state=state, code_challenge=challenge)
+            url = _build_authorize_url(
+                oauth_cfg,
+                state=state,
+                code_challenge=challenge,
+                extra=_oauth_quirk(provider_id)["authorize_extra"],
+            )
             open_browser(url)
             # Save PKCE state for later code exchange
             self.call_from_thread(self._save_login_pkce, provider_id, verifier, state)
@@ -922,10 +961,11 @@ def make_app(
         @work(thread=True, exclusive=True, group="login")
         def _run_auth_code_exchange(self, provider_id, models, code_raw, verifier, pkce_state):
             """Exchange authorization code for tokens."""
-            from rickshaw_ai.auth.oauth import OAuthClient, _parse_callback, _credential_from_token
+            from rickshaw_ai.auth.oauth import _parse_callback
 
             info = models.provider_info(provider_id)
             oauth_cfg = info.oauth
+            quirk = _oauth_quirk(provider_id)
 
             code, returned_state = _parse_callback(code_raw)
             if returned_state is not None and pkce_state and returned_state != pkce_state:
@@ -945,10 +985,18 @@ def make_app(
                 form["redirect_uri"] = oauth_cfg.redirect_uri
             if verifier:
                 form["code_verifier"] = verifier
+            if quirk["token_include_state"] and pkce_state:
+                form["state"] = pkce_state
 
             import httpx
             try:
-                credential = run_sync(self._exchange_token(oauth_cfg.token_url, form))
+                credential = run_sync(
+                    self._exchange_token(
+                        oauth_cfg.token_url,
+                        form,
+                        quirk["token_encoding"],
+                    )
+                )
             except Exception as exc:
                 self.call_from_thread(self._write, f"login failed: {exc}", "warn")
                 return
@@ -966,10 +1014,13 @@ def make_app(
             self.call_from_thread(self._oauth_login_done, provider_id, info)
 
         @staticmethod
-        async def _exchange_token(token_url, form):
+        async def _exchange_token(token_url, form, encoding):
             from rickshaw_ai.auth.oauth import _credential_from_token
             async with httpx.AsyncClient(timeout=30) as http:
-                resp = await http.post(token_url, data=form)
+                if encoding == "json":
+                    resp = await http.post(token_url, json=form)
+                else:
+                    resp = await http.post(token_url, data=form)
                 if resp.status_code != 200:
                     raise RuntimeError(f"token request rejected ({resp.status_code}): {resp.text}")
                 return _credential_from_token(resp.json())
@@ -1176,14 +1227,19 @@ def main(argv: list[str] | None = None) -> None:
 
     # Determine provider: explicit flag > env var > persisted setting > None.
     # A fresh install seeds settings.json with provider="" so the TUI prompts.
+    provider_source: str | None
     if args.provider:
         provider_name: str | None = args.provider
+        provider_source = "flag"
     elif os.environ.get("RICKSHAW_PROVIDER"):
         provider_name = os.environ["RICKSHAW_PROVIDER"]
+        provider_source = "env"
     elif settings.get("provider"):
         provider_name = settings["provider"]
+        provider_source = "settings"
     else:
         provider_name = None
+        provider_source = None
 
     provider: LLMProvider | None = None
     if provider_name is not None:
@@ -1198,11 +1254,15 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 sys.exit(1)
             if provider is None:
-                print(
-                    f"Could not use provider {provider_name!r}: {exc}. "
-                    "Launching provider picker.",
-                    file=sys.stderr,
-                )
+                if provider_source == "settings":
+                    settings["provider"] = ""
+                    save_settings(settings)
+                else:
+                    print(
+                        f"Could not use provider {provider_name!r}: {exc}. "
+                        "Launching provider picker.",
+                        file=sys.stderr,
+                    )
             elif args.allow_unvalidated:
                 print(
                     f"Provider validation failed ({provider_name}): {exc}",

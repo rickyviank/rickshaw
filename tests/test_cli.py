@@ -103,17 +103,19 @@ def test_main_validate_only_failure(mock_config, mock_build):
 
 @patch("rickshaw.tui._run_app")
 @patch("rickshaw.tui._build_provider")
+@patch("rickshaw.tui.save_settings")
 @patch("rickshaw.tui.load_settings")
 @patch("rickshaw.tui.load_config")
-def test_main_build_failure_falls_back_to_picker(
-    mock_config, mock_load_settings, mock_build, mock_run
+def test_main_persisted_invalid_provider_self_heals(
+    mock_config, mock_load_settings, mock_save_settings, mock_build, mock_run, capsys
 ):
-    """A persisted provider that cannot build falls back to the picker."""
+    """An invalid persisted provider is cleared silently and falls back."""
     from rickshaw.config import RickshawConfig
     from rickshaw.tui import main
 
     mock_config.return_value = RickshawConfig()
-    mock_load_settings.return_value = {"provider": "fake"}
+    settings = {"provider": "fake", "effort": "medium"}
+    mock_load_settings.return_value = settings
     mock_build.side_effect = ValueError("unknown provider")
 
     main(["--db-path", ":memory:"])
@@ -121,6 +123,30 @@ def test_main_build_failure_falls_back_to_picker(
     mock_run.assert_called_once()
     _, call_provider, _, _ = mock_run.call_args[0]
     assert call_provider is None
+    assert settings["provider"] == ""
+    mock_save_settings.assert_called_once_with(settings)
+    assert "Could not use provider" not in capsys.readouterr().err
+
+
+@patch("rickshaw.tui._run_app")
+@patch("rickshaw.tui._build_provider")
+@patch("rickshaw.tui.load_config")
+def test_main_provider_flag_unknown_prints_error_and_falls_back(
+    mock_config, mock_build, mock_run, capsys
+):
+    """An explicit unknown --provider still reports the failure."""
+    from rickshaw.config import RickshawConfig
+    from rickshaw.tui import main
+
+    mock_config.return_value = RickshawConfig()
+    mock_build.side_effect = ValueError("unknown provider")
+
+    main(["--provider", "fake", "--db-path", ":memory:"])
+
+    mock_run.assert_called_once()
+    _, call_provider, _, _ = mock_run.call_args[0]
+    assert call_provider is None
+    assert "Could not use provider 'fake'" in capsys.readouterr().err
 
 
 @patch("rickshaw.tui._run_app")
