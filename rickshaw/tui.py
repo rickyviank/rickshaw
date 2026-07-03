@@ -9,7 +9,14 @@ are active and surfaced.
 
 Launch::
 
-    rickshaw --provider openai --effort high
+    rickshaw                       # prompts for provider on startup
+    rickshaw --provider openai     # optional override
+    rickshaw --effort high
+
+When launched without ``--provider`` and with no persisted provider in
+``~/.rickshaw/settings.json``, the TUI opens in a *no-provider-selected* state
+and immediately shows an interactive provider picker. OAuth-capable providers
+trigger a login flow. ``--provider`` remains available as an optional override.
 
 The module itself (and the branding constants below) import fine without Textual
 installed -- the framework is imported lazily, only when the app is built.
@@ -19,7 +26,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+import webbrowser
+from pathlib import Path
+
+import httpx
 
 from rickshaw.cli import _EFFORT_NAMES, _build_provider, load_config
 
@@ -32,6 +44,11 @@ from rickshaw.providers.build import build_provider_from_profile
 from rickshaw.providers.factory import get_provider
 from rickshaw.settings import load_settings, save_settings
 
+from rickshaw_ai._builtins import default_providers as _builtin_providers
+from rickshaw_ai.credentials.store import FileCredentialStore
+from rickshaw_ai.factory import builtin_models as _builtin_models
+from rickshaw.providers._bridge import run_sync
+
 # Branding — module-level so cli.py can import and reuse them.
 RICKSHAW_LOGO = "o--o  rickshaw"
 RICKSHAW_SLOGAN = "your driver, your memory"
@@ -39,6 +56,8 @@ RICKSHAW_BANNER = f"{RICKSHAW_LOGO} \u00b7 {RICKSHAW_SLOGAN}"
 
 # Where the memory layer persists across sessions (vs. the default ":memory:").
 _DEFAULT_DB_PATH = "rickshaw_memory.db"
+
+_CREDENTIALS_PATH = "~/.rickshaw/credentials.json"
 
 # Slash-commands, used for help text and inline autocomplete.
 _COMMANDS = {
@@ -50,6 +69,7 @@ _COMMANDS = {
     "/provider": "/provider [name|add] -- show, switch, or register a provider.",
     "/effort": "/effort <low|medium|high> -- set reasoning effort.",
     "/model": "/model [name] -- show or switch the chat model.",
+    "/login": "Authenticate (or re-authenticate) the active provider via OAuth.",
     "/memory": "List recently stored memories.",
     "/quit": "Exit.",
     "/exit": "Exit.",
@@ -125,13 +145,29 @@ def _rebuild_provider(name: str, cfg: RickshawConfig, model: str) -> LLMProvider
     raise ValueError(f"no profile found for provider {name!r}")
 
 
+def _get_builtin_provider_names() -> list[str]:
+    """Return sorted ids of the built-in providers from rickshaw_ai."""
+    return sorted(p.id for p in _builtin_providers())
+
+
+def _builtin_provider_info(provider_id: str):
+    """Look up a ProviderInfo by id from the builtins."""
+    for p in _builtin_providers():
+        if p.id == provider_id:
+            return p
+    return None
+
+
 def make_app(
     orchestrator: Orchestrator,
-    provider: LLMProvider,
+    provider: LLMProvider | None,
     effort: Effort,
     cfg: RickshawConfig | None = None,
 ):
     """Build the Textual app instance. Imports Textual lazily.
+
+    *provider* may be ``None`` when launching without a pre-selected provider.
+    The TUI then shows an interactive picker on mount.
 
     Kept as a factory (rather than a module-level class) so importing this
     module does not require Textual to be installed.
@@ -225,6 +261,7 @@ def make_app(
             self._has_turns = False
             self._provider_add_state: dict | None = None
             self._settings_state: dict | None = None
+            self._login_state: dict | None = None
 
         # ---- layout -----------------------------------------------------
 
@@ -239,19 +276,50 @@ def make_app(
             )
 
         def on_mount(self) -> None:
-            caps = self.provider.capabilities()
-            model = getattr(self.provider, "_model", "") or self.provider.name
-            self._write(
-                f"{self.provider.name} · {model} · effort "
-                f"{self.orchestrator.effort.value} · /help",
-                cls="meta",
-            )
-            if not caps.function_calling:
+            if self.provider is None:
+                self._write("no provider selected", cls="meta")
+                self._start_provider_picker()
+            else:
+                caps = self.provider.capabilities()
+                model = getattr(self.provider, "_model", "") or self.provider.name
                 self._write(
-                    "tools off — recall is harness-driven for this provider.",
+                    f"{self.provider.name} · {model} · effort "
+                    f"{self.orchestrator.effort.value} · /help",
                     cls="meta",
                 )
+                if not caps.function_calling:
+                    self._write(
+                        "tools off — recall is harness-driven for this provider.",
+                        cls="meta",
+                    )
             self.query_one("#prompt", Input).focus()
+
+        # ---- on-launch provider picker ---------------------------------
+
+        def _start_provider_picker(self) -> None:
+            """Display the provider picker (builtins + configured)."""
+            builtin_names = _get_builtin_provider_names()
+            configured_names = sorted(self.cfg.providers)
+            all_names = sorted(set(builtin_names) | set(configured_names))
+            if not all_names:
+                self._write("No providers available.", "warn")
+                return
+            self._write("", "meta")
+            self._write("  Pick a provider (enter name, Esc to cancel):", "meta")
+            current = self.provider.name if self.provider else ""
+            for name in all_names:
+                info = _builtin_provider_info(name)
+                oauth_tag = ""
+                if info and info.oauth:
+                    oauth_tag = " (oauth)"
+                marker = "\u2666" if name == current else " "
+                self._write(f"    {name:<16} {marker}{oauth_tag}", "meta")
+            self._settings_state = {
+                "step": "provider",
+                "providers": all_names,
+                "on_launch": self.provider is None,
+            }
+            self._set_hint("provider name (Enter to submit, Esc to cancel)")
 
         # ---- transcript helpers ----------------------------------------
 
@@ -281,6 +349,9 @@ def make_app(
             value = event.value.strip()
             event.input.value = ""
             # Wizard intercepts all input while active.
+            if self._login_state is not None:
+                self._login_step(value)
+                return
             if self._settings_state is not None:
                 self._settings_step(value)
                 return
@@ -291,6 +362,9 @@ def make_app(
                 return
             if value.startswith("/"):
                 self._handle_command(value)
+                return
+            if self.provider is None:
+                self._write("No provider selected. Use /settings to pick one.", "warn")
                 return
             if self._turn_active:
                 self._write("A turn is already running; press Esc to interrupt.", "warn")
@@ -320,6 +394,8 @@ def make_app(
                 self._cmd_models()
             elif cmd in ("/provider", "/engine"):
                 self._cmd_provider(arg)
+            elif cmd == "/login":
+                self._cmd_login()
             elif cmd == "/memory":
                 self._cmd_memory()
             else:
@@ -331,6 +407,9 @@ def make_app(
             self._write("esc interrupts a running turn · ^c quits", "meta")
 
         def _cmd_status(self) -> None:
+            if self.provider is None:
+                self._write("provider · (none) · /settings to pick one", "meta")
+                return
             model = getattr(self.provider, "_model", "") or self.provider.name
             caps = self.provider.capabilities()
             tools = "tools on" if caps.function_calling else "tools off"
@@ -461,7 +540,8 @@ def make_app(
 
         def _cmd_settings(self) -> None:
             """Interactive provider/model picker with settings header."""
-            model = getattr(self.provider, "_model", "") or self.provider.name
+            prov_name = self.provider.name if self.provider else "(none)"
+            model = (getattr(self.provider, "_model", "") or prov_name) if self.provider else "(none)"
             settings = load_settings()
             emb_prov = settings.get(
                 "embedding_provider",
@@ -473,7 +553,7 @@ def make_app(
             lines = [
                 "Settings",
                 "\u2500" * 44,
-                f"  provider         {self.provider.name}",
+                f"  provider         {prov_name}",
                 f"  model            {model}",
                 f"  effort           {self.orchestrator.effort.value}",
                 f"  embedding        {emb_prov} / {emb_model}",
@@ -482,18 +562,7 @@ def make_app(
             for line in lines:
                 self._write(line, "meta")
 
-            # Step 1: list providers and prompt the user to pick one.
-            provider_names = sorted(self.cfg.providers)
-            if not provider_names:
-                self._write("No providers configured.", "warn")
-                return
-            self._write("", "meta")
-            self._write("  Pick a provider (enter name, Esc to cancel):", "meta")
-            for name in provider_names:
-                marker = "\u2666" if name == self.provider.name else " "
-                self._write(f"    {name:<16} {marker}", "meta")
-            self._settings_state = {"step": "provider", "providers": provider_names}
-            self._set_hint("provider name (Enter to submit, Esc to cancel)")
+            self._start_provider_picker()
 
         def _settings_step(self, value: str) -> None:
             """Process one step of the interactive /settings wizard."""
@@ -508,8 +577,9 @@ def make_app(
                     self._set_hint(_DEFAULT_HINT)
                     return
                 chosen = value.strip()
-                if chosen not in self.cfg.providers:
-                    available = ", ".join(state["providers"])
+                all_providers = state["providers"]
+                if chosen not in all_providers:
+                    available = ", ".join(all_providers)
                     self._write(
                         f"Unknown provider {chosen!r}. Available: {available}",
                         "warn",
@@ -517,8 +587,22 @@ def make_app(
                     return
                 self._write(f"  provider: {chosen}", "meta")
 
+                # Check if this is an OAuth-capable builtin that needs login.
+                info = _builtin_provider_info(chosen)
+                if info and info.oauth:
+                    if "oauth" in info.auth_methods:
+                        self._settings_state = None
+                        self._set_hint(_DEFAULT_HINT)
+                        self._start_oauth_login(chosen, info)
+                        return
+
                 # Build a temporary provider to list its models.
-                profile = self.cfg.providers[chosen]
+                profile = self.cfg.providers.get(chosen)
+                if profile is None:
+                    self._write(f"No profile for {chosen!r}; use /provider add.", "warn")
+                    self._settings_state = None
+                    self._set_hint(_DEFAULT_HINT)
+                    return
                 try:
                     temp = build_provider_from_profile(
                         chosen, profile,
@@ -540,7 +624,7 @@ def make_app(
 
                 current_model = (
                     getattr(self.provider, "_model", "")
-                    if chosen == self.provider.name
+                    if self.provider and chosen == self.provider.name
                     else ""
                 )
                 self._write("", "meta")
@@ -757,6 +841,226 @@ def make_app(
                 "meta",
             )
 
+        # ---- OAuth login ------------------------------------------------
+
+        def _start_oauth_login(self, provider_id: str, info=None) -> None:
+            """Begin the OAuth login flow for *provider_id*."""
+            if info is None:
+                info = _builtin_provider_info(provider_id)
+            if info is None or info.oauth is None:
+                self._write(f"{provider_id} does not support OAuth.", "warn")
+                return
+
+            cred_path = Path(_CREDENTIALS_PATH).expanduser()
+            store = FileCredentialStore(cred_path)
+            models = _builtin_models(credentials=store)
+
+            if info.oauth.mode == "device_code":
+                self._write(f"logging in to {provider_id} (device code)…", "meta")
+                self._run_device_code_login(provider_id, models)
+            else:
+                self._write(f"logging in to {provider_id} (browser)…", "meta")
+                self._write("a browser window will open — paste the code below.", "meta")
+                self._login_state = {
+                    "provider_id": provider_id,
+                    "models": models,
+                }
+                self._set_hint("paste authorization code (Enter to submit, Esc to cancel)")
+
+                def _open_browser(url: str) -> None:
+                    self.call_from_thread(
+                        self._write,
+                        f"open this URL if the browser didn't launch:\n{url}",
+                        "meta",
+                    )
+                    webbrowser.open(url)
+
+                # Start the login but wait for user to paste the code
+                self._login_state["open_browser"] = _open_browser
+                self._run_auth_code_login_start(provider_id, models, _open_browser)
+
+        @work(thread=True, exclusive=True, group="login")
+        def _run_auth_code_login_start(self, provider_id, models, open_browser):
+            """Start auth-code login: build authorize URL and open browser."""
+            import asyncio
+            from rickshaw_ai.auth.oauth import OAuthClient, build_authorize_url, generate_pkce
+            import base64, os as _os
+
+            info = models.provider_info(provider_id)
+            oauth_cfg = info.oauth
+            verifier = challenge = None
+            if oauth_cfg.use_pkce:
+                verifier, challenge = generate_pkce()
+            state = base64.urlsafe_b64encode(_os.urandom(16)).rstrip(b"=").decode()
+            url = build_authorize_url(oauth_cfg, state=state, code_challenge=challenge)
+            open_browser(url)
+            # Save PKCE state for later code exchange
+            self.call_from_thread(self._save_login_pkce, provider_id, verifier, state)
+
+        def _save_login_pkce(self, provider_id, verifier, state):
+            if self._login_state and self._login_state.get("provider_id") == provider_id:
+                self._login_state["verifier"] = verifier
+                self._login_state["state"] = state
+
+        def _login_step(self, value: str) -> None:
+            """Handle user pasting the authorization code."""
+            state = self._login_state
+            if state is None:
+                return
+            if not value:
+                self._write("(cancelled)", "warn")
+                self._login_state = None
+                self._set_hint(_DEFAULT_HINT)
+                return
+            provider_id = state["provider_id"]
+            models = state["models"]
+            code_raw = value.strip()
+            verifier = state.get("verifier")
+            pkce_state = state.get("state")
+            self._login_state = None
+            self._set_hint(_DEFAULT_HINT)
+            self._run_auth_code_exchange(provider_id, models, code_raw, verifier, pkce_state)
+
+        @work(thread=True, exclusive=True, group="login")
+        def _run_auth_code_exchange(self, provider_id, models, code_raw, verifier, pkce_state):
+            """Exchange authorization code for tokens."""
+            from rickshaw_ai.auth.oauth import OAuthClient, _parse_callback, _credential_from_token
+
+            info = models.provider_info(provider_id)
+            oauth_cfg = info.oauth
+
+            code, returned_state = _parse_callback(code_raw)
+            if returned_state is not None and pkce_state and returned_state != pkce_state:
+                self.call_from_thread(
+                    self._write,
+                    "OAuth state mismatch — possible CSRF; please retry /login",
+                    "warn",
+                )
+                return
+
+            form = {
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": oauth_cfg.client_id,
+            }
+            if oauth_cfg.redirect_uri:
+                form["redirect_uri"] = oauth_cfg.redirect_uri
+            if verifier:
+                form["code_verifier"] = verifier
+
+            import httpx
+            try:
+                credential = run_sync(self._exchange_token(oauth_cfg.token_url, form))
+            except Exception as exc:
+                self.call_from_thread(self._write, f"login failed: {exc}", "warn")
+                return
+
+            # Store credential
+            async def _set_cred(existing):
+                return credential
+
+            try:
+                run_sync(models.credentials.modify(provider_id, _set_cred))
+            except Exception as exc:
+                self.call_from_thread(self._write, f"failed to store credential: {exc}", "warn")
+                return
+
+            self.call_from_thread(self._oauth_login_done, provider_id, info)
+
+        @staticmethod
+        async def _exchange_token(token_url, form):
+            from rickshaw_ai.auth.oauth import _credential_from_token
+            async with httpx.AsyncClient(timeout=30) as http:
+                resp = await http.post(token_url, data=form)
+                if resp.status_code != 200:
+                    raise RuntimeError(f"token request rejected ({resp.status_code}): {resp.text}")
+                return _credential_from_token(resp.json())
+
+        @work(thread=True, exclusive=True, group="login")
+        def _run_device_code_login(self, provider_id, models):
+            """Run device-code login (e.g. GitHub Copilot)."""
+            def show_user_code(code: str, uri: str) -> None:
+                msg = f"enter code {code}"
+                if uri:
+                    msg += f" at {uri}"
+                self.call_from_thread(self._write, msg, "meta")
+
+            try:
+                run_sync(models.login(
+                    provider_id,
+                    show_user_code=show_user_code,
+                ))
+            except Exception as exc:
+                self.call_from_thread(self._write, f"login failed: {exc}", "warn")
+                return
+
+            info = models.provider_info(provider_id)
+            self.call_from_thread(self._oauth_login_done, provider_id, info)
+
+        def _oauth_login_done(self, provider_id, info) -> None:
+            """Finalize after successful OAuth login: switch to the provider."""
+            self._write(f"authenticated · {provider_id}", "meta")
+
+            # Ensure the provider has a profile in cfg
+            if provider_id not in self.cfg.providers and info:
+                wf = "openai"
+                if info.protocol == "anthropic":
+                    wf = "anthropic"
+                elif info.protocol in ("openai", "openai_compatible"):
+                    wf = "openai"
+                default_model = info.models[0].model if info.models else ""
+                self.cfg.providers[provider_id] = ProviderProfile(
+                    base_url=info.base_url,
+                    model=default_model,
+                    api_key_env=info.env_keys[0] if info.env_keys else "",
+                    wire_format=wf,
+                )
+
+            # Build the provider and switch
+            profile = self.cfg.providers.get(provider_id)
+            if profile is None:
+                self._write(f"no profile for {provider_id}; cannot build provider", "warn")
+                return
+            try:
+                new_provider = build_provider_from_profile(
+                    provider_id, profile,
+                    embedding_model=self.cfg.openai_embedding_model,
+                )
+            except Exception as exc:
+                logger.exception("Failed to build provider after OAuth login")
+                self._write(f"Cannot switch: {exc}", "warn")
+                return
+
+            self.provider = new_provider
+            self.orchestrator.provider = new_provider
+
+            settings = load_settings()
+            settings["provider"] = provider_id
+            save_settings(settings)
+
+            model = getattr(new_provider, "_model", "") or provider_id
+            self._write(
+                f"{provider_id} · {model} · effort "
+                f"{self.orchestrator.effort.value}",
+                "meta",
+            )
+
+        def _cmd_login(self) -> None:
+            """Authenticate (or re-authenticate) the active provider via OAuth."""
+            if self.provider is None:
+                self._write("No provider selected. Use /settings first.", "warn")
+                return
+            provider_id = self.provider.name
+            info = _builtin_provider_info(provider_id)
+            if info is None or info.oauth is None:
+                self._write(
+                    f"{provider_id} does not support OAuth login. "
+                    f"Set the API key via its env var instead.",
+                    "warn",
+                )
+                return
+            self._start_oauth_login(provider_id, info)
+
         # ---- turn execution --------------------------------------------
 
         def _start_turn(self, text: str) -> None:
@@ -826,6 +1130,11 @@ def make_app(
         # ---- actions ----------------------------------------------------
 
         def action_interrupt(self) -> None:
+            if self._login_state is not None:
+                self._login_state = None
+                self._write("(cancelled)", "warn")
+                self._set_hint(_DEFAULT_HINT)
+                return
             if self._settings_state is not None:
                 self._settings_state = None
                 self._write("(cancelled)", "warn")
@@ -852,7 +1161,7 @@ def make_app(
 
 def _run_app(
     orchestrator: Orchestrator,
-    provider: LLMProvider,
+    provider: LLMProvider | None,
     effort: Effort,
     cfg: RickshawConfig,
 ) -> None:
@@ -864,26 +1173,42 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     cfg = load_config()
 
-    provider_name = args.provider or cfg.provider
+    settings = load_settings()
     effort = _EFFORT_NAMES.get(args.effort, cfg.effort) if args.effort else cfg.effort
 
-    provider = _build_provider(provider_name, cfg)
+    # Determine provider: explicit flag > env var > persisted setting > None.
+    # A fresh install seeds settings.json with provider="" so the TUI prompts.
+    if args.provider:
+        provider_name: str | None = args.provider
+    elif os.environ.get("RICKSHAW_PROVIDER"):
+        provider_name = os.environ["RICKSHAW_PROVIDER"]
+    elif settings.get("provider"):
+        provider_name = settings["provider"]
+    else:
+        provider_name = None
 
-    try:
-        provider.validate()
-    except Exception as exc:
-        print(f"Provider validation failed ({provider_name}): {exc}", file=sys.stderr)
-        if args.allow_unvalidated and not args.validate_only:
-            print("--allow-unvalidated set; continuing anyway — calls may fail.\n", file=sys.stderr)
-        else:
-            sys.exit(1)
+    provider: LLMProvider | None = None
+    if provider_name is not None:
+        provider = _build_provider(provider_name, cfg)
 
-    if args.validate_only:
-        print(f"Provider {provider_name!r} validated successfully.")
-        return
+        try:
+            provider.validate()
+        except Exception as exc:
+            print(f"Provider validation failed ({provider_name}): {exc}", file=sys.stderr)
+            if args.allow_unvalidated and not args.validate_only:
+                print("--allow-unvalidated set; continuing anyway — calls may fail.\n", file=sys.stderr)
+            else:
+                sys.exit(1)
+
+        if args.validate_only:
+            print(f"Provider {provider_name!r} validated successfully.")
+            return
+    elif args.validate_only:
+        print("No provider specified; nothing to validate.", file=sys.stderr)
+        sys.exit(1)
 
     memory = MemoryService(db_path=args.db_path)
-    orchestrator = Orchestrator(provider=provider, memory=memory, effort=effort)
+    orchestrator = Orchestrator(provider=provider, memory=memory, effort=effort)  # type: ignore[arg-type]
 
     _run_app(orchestrator, provider, effort, cfg)
 

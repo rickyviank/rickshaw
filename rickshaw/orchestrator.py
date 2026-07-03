@@ -116,7 +116,7 @@ class Orchestrator:
         self.retry_backoff = retry_backoff
 
         # Session-start capability notice (item 7).
-        if not self.provider.capabilities().function_calling:
+        if self.provider is not None and not self.provider.capabilities().function_calling:
             logger.info(
                 "Provider '%s' does not support function-calling; memory tools "
                 "will not be advertised to the model. Context retrieval is "

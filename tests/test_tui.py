@@ -885,3 +885,213 @@ async def test_app_provider_switch_error_is_logged(caplog):
             await pilot.pause()
 
     assert any("Failed to switch provider" in m for m in caplog.messages)
+
+
+# --- No-provider / provider picker tests ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_app_no_provider_shows_picker():
+    """Launching with provider=None shows the provider picker."""
+    pytest.importorskip("textual")
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
+    orch = Orchestrator(provider=None, memory=memory)
+    cfg = RickshawConfig()
+    app = tui.make_app(orch, None, Effort.MEDIUM, cfg=cfg)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "no provider selected" in rendered
+        assert "Pick a provider" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_picker_selects_key_based_provider():
+    """Selecting a key-based (non-OAuth) provider in the picker works."""
+    pytest.importorskip("textual")
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
+    orch = Orchestrator(provider=None, memory=memory)
+    cfg = RickshawConfig()
+    fake_provider = _FakeProvider()
+    cfg.providers["fake"] = ProviderProfile(
+        base_url="", model="fake-model",
+        api_key_env="FAKE_KEY", wire_format="openai",
+    )
+    app = tui.make_app(orch, None, Effort.MEDIUM, cfg=cfg)
+
+    # Patch _builtin_provider_info to return None for "fake" (no OAuth)
+    # and build_provider_from_profile to return our fake provider.
+    with patch("rickshaw.tui._builtin_provider_info", return_value=None), \
+         patch("rickshaw.tui.build_provider_from_profile", return_value=fake_provider), \
+         patch("rickshaw.tui._get_builtin_provider_names", return_value=[]):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            rendered = " ".join(
+                str(w.render())
+                for w in app.query_one("#transcript").query("Static")
+            )
+            assert "Pick a provider" in rendered
+
+            # Select the "fake" provider.
+            app.query_one("#prompt").value = "fake"
+            await pilot.press("enter")
+            await pilot.pause()
+            rendered = " ".join(
+                str(w.render())
+                for w in app.query_one("#transcript").query("Static")
+            )
+            assert "Pick a model" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_picker_oauth_provider_triggers_login():
+    """Selecting an OAuth provider triggers the login flow (mocked)."""
+    pytest.importorskip("textual")
+    from rickshaw_ai.registry import OAuthConfig, ProviderInfo
+
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
+    orch = Orchestrator(provider=None, memory=memory)
+    cfg = RickshawConfig()
+    app = tui.make_app(orch, None, Effort.MEDIUM, cfg=cfg)
+
+    # Create a mock OAuth provider info
+    mock_info = MagicMock()
+    mock_info.oauth = MagicMock()
+    mock_info.oauth.mode = "auth_code"
+    mock_info.auth_methods = ["oauth", "api_key"]
+    mock_info.id = "testprov"
+
+    with patch("rickshaw.tui._builtin_provider_info", return_value=mock_info), \
+         patch("rickshaw.tui._get_builtin_provider_names", return_value=["testprov"]), \
+         patch.object(type(app), "_start_oauth_login") as mock_login:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            rendered = " ".join(
+                str(w.render())
+                for w in app.query_one("#transcript").query("Static")
+            )
+            assert "Pick a provider" in rendered
+
+            # Select the OAuth provider.
+            app.query_one("#prompt").value = "testprov"
+            await pilot.press("enter")
+            await pilot.pause()
+            mock_login.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_app_no_provider_rejects_messages():
+    """Sending a message with no provider shows a warning."""
+    pytest.importorskip("textual")
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
+    orch = Orchestrator(provider=None, memory=memory)
+    cfg = RickshawConfig()
+    app = tui.make_app(orch, None, Effort.MEDIUM, cfg=cfg)
+
+    with patch("rickshaw.tui._get_builtin_provider_names", return_value=[]):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            # Cancel the picker
+            await pilot.press("escape")
+            await pilot.pause()
+
+            app.query_one("#prompt").value = "hello world"
+            await pilot.press("enter")
+            await pilot.pause()
+            rendered = " ".join(
+                str(w.render())
+                for w in app.query_one("#transcript").query("Static")
+            )
+            assert "No provider selected" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_login_command_no_provider():
+    """/login with no provider active shows a warning."""
+    pytest.importorskip("textual")
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
+    orch = Orchestrator(provider=None, memory=memory)
+    cfg = RickshawConfig()
+    app = tui.make_app(orch, None, Effort.MEDIUM, cfg=cfg)
+
+    with patch("rickshaw.tui._get_builtin_provider_names", return_value=[]):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+
+            app.query_one("#prompt").value = "/login"
+            await pilot.press("enter")
+            await pilot.pause()
+            rendered = " ".join(
+                str(w.render())
+                for w in app.query_one("#transcript").query("Static")
+            )
+            assert "No provider selected" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_login_command_no_oauth():
+    """/login on a non-OAuth provider shows a warning."""
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    cfg = RickshawConfig()
+    app = tui.make_app(orch, provider, Effort.MEDIUM, cfg=cfg)
+
+    with patch("rickshaw.tui._builtin_provider_info", return_value=None):
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/login"
+            await pilot.press("enter")
+            await pilot.pause()
+            rendered = " ".join(
+                str(w.render())
+                for w in app.query_one("#transcript").query("Static")
+            )
+            assert "does not support OAuth" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_help_includes_login():
+    """/help lists the /login command."""
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/help"
+        await pilot.press("enter")
+        await pilot.pause()
+        rendered = " ".join(
+            str(w.render())
+            for w in app.query_one("#transcript").query("Static")
+        )
+        assert "/login" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_status_no_provider():
+    """/status with no provider active shows (none)."""
+    pytest.importorskip("textual")
+    memory = MemoryService(embedder=TFIDFEmbedder(dim=32))
+    orch = Orchestrator(provider=None, memory=memory)
+    cfg = RickshawConfig()
+    app = tui.make_app(orch, None, Effort.MEDIUM, cfg=cfg)
+
+    with patch("rickshaw.tui._get_builtin_provider_names", return_value=[]):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+
+            app.query_one("#prompt").value = "/status"
+            await pilot.press("enter")
+            await pilot.pause()
+            rendered = " ".join(
+                str(w.render())
+                for w in app.query_one("#transcript").query("Static")
+            )
+            assert "(none)" in rendered

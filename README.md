@@ -37,7 +37,7 @@ is needed for the terminal UI.
 
 | Variable | Required | Description |
 |---|---|---|
-| `RICKSHAW_PROVIDER` | No | Default provider (`openai`, `devin`, or `anthropic`). Defaults to `openai`. |
+| `RICKSHAW_PROVIDER` | No | Default provider (e.g. `openai`, `anthropic`). When unset and no `--provider` flag, the TUI prompts interactively. |
 | `RICKSHAW_EFFORT` | No | Default effort level: `low`, `medium`, `high`. Defaults to `medium`. |
 | `OPENAI_API_KEY` | For OpenAI | OpenAI API key. |
 | `OPENAI_BASE_URL` | No | Override the OpenAI API base URL. |
@@ -70,7 +70,10 @@ register("my_llm", MyLLMProvider)
 The single `rickshaw` command launches a full-screen Textual TUI:
 
 ```bash
-# Launch the TUI
+# Launch — prompts for provider if none is configured
+rickshaw
+
+# Override the provider (optional)
 rickshaw --provider openai --effort high
 
 # Or via python -m
@@ -82,6 +85,13 @@ rickshaw --provider openai --validate-only
 # Launch even if validation fails (by default, failure exits non-zero)
 rickshaw --provider openai --allow-unvalidated
 ```
+
+When launched without `--provider` and with no persisted provider in
+`~/.rickshaw/settings.json`, the TUI opens in a *no-provider-selected* state and
+immediately shows an interactive provider picker listing all built-in providers
+(from `rickshaw_ai`). Selecting an OAuth-capable provider (e.g. `anthropic`,
+`openai`, `copilot`) triggers an in-TUI OAuth login flow. `--provider` remains
+available as an optional override for backward compatibility.
 
 ### Terminal UI
 
@@ -103,7 +113,8 @@ surfaced.
   `rickshaw_memory.db`) so context carries across sessions.
 - **Slash-commands:** `/help`, `/status` (provider · model · effort), `/settings`
   (show current settings), `/provider [name|add]` (list, switch, or register a
-  provider), `/clear`, `/effort <level>`, `/model [name]`, `/memory`, `/quit`.
+  provider), `/login` (authenticate the active provider via OAuth), `/clear`,
+  `/effort <level>`, `/model [name]`, `/memory`, `/quit`.
   `/engine` is still accepted as a deprecated alias for `/provider`.
   Type `/` for inline autocomplete.
 - **Keys:** `Esc` interrupts an in-flight turn, `Ctrl+L` clears the transcript,
@@ -113,10 +124,15 @@ surfaced.
 
 `/settings` shows current settings then launches an interactive two-step wizard:
 
-1. **Pick a provider** — lists all configured providers (from
-   `~/.rickshaw/settings.json` and builtins) with the active one marked.
-2. **Pick a model** — lists the chosen provider's `available_models()` with the
-   active model marked; selecting one applies the switch immediately.
+1. **Pick a provider** — lists all built-in providers (from `rickshaw_ai`) and
+   any custom providers from `~/.rickshaw/settings.json`, with the active one
+   marked. OAuth-capable providers are tagged with `(oauth)`.
+2. **OAuth login** — if the chosen provider supports OAuth, a login flow is
+   triggered (browser-based PKCE or device-code). Credentials are persisted to
+   `~/.rickshaw/credentials.json`.
+3. **Pick a model** — for non-OAuth providers, lists the chosen provider's
+   `available_models()` with the active model marked; selecting one applies the
+   switch immediately.
 
 ```
 Settings
@@ -149,6 +165,13 @@ Use `/provider` to list available providers, `/provider <name>` to switch, or
 `/provider add` to register a custom OpenAI-compatible endpoint step by step.
 The deprecated `/engine` alias still works for backward compatibility.
 Changes are saved to `~/.rickshaw/settings.json` and take effect immediately.
+
+### `/login` — re-authenticate via OAuth
+
+`/login` triggers the OAuth login flow for the currently active provider. Use it
+to refresh an expired token or to authenticate a freshly selected OAuth provider.
+Key-based providers (no OAuth support) are told to set their API key env var
+instead.
 
 ### Persistent settings (`~/.rickshaw/settings.json`)
 

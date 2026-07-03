@@ -19,7 +19,7 @@ _CURRENT_VERSION = 1
 
 _DEFAULT_SETTINGS: dict = {
     "version": _CURRENT_VERSION,
-    "provider": "openai",
+    "provider": "",
     "effort": "medium",
     "embedding_provider": "openai",
     "embedding_model": "text-embedding-3-small",

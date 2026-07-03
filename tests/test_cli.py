@@ -79,7 +79,7 @@ def test_main_validate_only_success(mock_config, mock_build, capsys):
     provider.validate = MagicMock()
     mock_build.return_value = provider
 
-    main(["--validate-only"])
+    main(["--provider", "openai", "--validate-only"])
 
     captured = capsys.readouterr()
     assert "validated successfully" in captured.out
@@ -145,3 +145,43 @@ def test_parse_allow_unvalidated_flag():
 
     args = _parse_args([])
     assert args.allow_unvalidated is False
+
+
+@patch("rickshaw.tui._run_app")
+@patch("rickshaw.tui.load_config")
+def test_main_bare_launch_no_error(mock_config, mock_run):
+    """A bare ``rickshaw`` launch (no --provider) no longer errors."""
+    from rickshaw.config import RickshawConfig
+    from rickshaw.tui import main
+
+    mock_config.return_value = RickshawConfig()
+
+    main(["--db-path", ":memory:"])
+
+    mock_run.assert_called_once()
+    _, call_provider, _, _ = mock_run.call_args[0]
+    # Provider should be None when nothing is configured.
+    assert call_provider is None
+
+
+@patch("rickshaw.tui._run_app")
+@patch("rickshaw.tui._build_provider")
+@patch("rickshaw.tui.load_config")
+def test_main_provider_flag_still_works(mock_config, mock_build, mock_run):
+    """--provider flag is respected and builds the provider normally."""
+    from rickshaw.config import RickshawConfig
+    from rickshaw.tui import main
+
+    mock_config.return_value = RickshawConfig()
+    provider = MagicMock()
+    provider.name = "openai"
+    provider.validate = MagicMock()
+    provider.capabilities.return_value = Capabilities(effort_levels=list(Effort))
+    mock_build.return_value = provider
+
+    main(["--provider", "openai", "--db-path", ":memory:"])
+
+    mock_build.assert_called_once()
+    mock_run.assert_called_once()
+    _, call_provider, _, _ = mock_run.call_args[0]
+    assert call_provider is provider

@@ -30,7 +30,7 @@ def test_load_creates_default_on_missing(settings_dir: Path):
     data = load_settings(settings_dir)
     assert settings_dir.is_file()
     assert data["version"] == _CURRENT_VERSION
-    assert data["provider"] == "openai"
+    assert data["provider"] == ""
     assert data["effort"] == "medium"
 
 
