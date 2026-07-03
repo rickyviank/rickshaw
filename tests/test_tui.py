@@ -144,10 +144,11 @@ def test_main_wiring_constructs_orchestrator(mock_config, mock_build):
     assert captured["effort"] == Effort.HIGH
 
 
+@patch("rickshaw.tui._run_app")
 @patch("rickshaw.tui._build_provider")
 @patch("rickshaw.tui.load_config")
-def test_main_validation_failure_exits(mock_config, mock_build):
-    """Validation failure exits non-zero by default (no --allow-unvalidated)."""
+def test_main_validation_failure_falls_back(mock_config, mock_build, mock_run):
+    """Validation failure on a normal launch falls back to the picker."""
     from rickshaw.config import RickshawConfig
 
     mock_config.return_value = RickshawConfig()
@@ -155,8 +156,11 @@ def test_main_validation_failure_exits(mock_config, mock_build):
     provider.validate = MagicMock(side_effect=ValueError("bad key"))
     mock_build.return_value = provider
 
-    with pytest.raises(SystemExit):
-        tui.main(["--provider", "fake", "--db-path", ":memory:"])
+    tui.main(["--provider", "fake", "--db-path", ":memory:"])
+
+    mock_run.assert_called_once()
+    _, call_provider, _, _ = mock_run.call_args[0]
+    assert call_provider is None
 
 
 @patch("rickshaw.tui._run_app")

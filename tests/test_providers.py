@@ -1,6 +1,7 @@
 """Tests for provider implementations (mocked HTTP)."""
 
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from rickshaw.providers.base import Effort, Message, Response, ToolCall, ToolSpe
 from rickshaw.providers.openai_provider import OpenAIProvider
 from rickshaw.providers.devin_provider import DevinProvider
 from rickshaw.providers.anthropic_provider import AnthropicProvider
+from rickshaw_ai.credentials.types import OAuthCredential
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +76,69 @@ def test_openai_validate_success():
 
 
 def test_openai_validate_no_key():
+    provider = OpenAIProvider(api_key="")
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        provider.validate()
+
+
+def _write_credential_file(path: Path, provider_id: str, credential) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({provider_id: credential.model_dump(mode="json")}))
+
+
+@respx.mock
+def test_openai_complete_uses_stored_oauth_credential(tmp_path, monkeypatch):
+    cred_path = tmp_path / "credentials.json"
+    monkeypatch.setenv("RICKSHAW_CREDENTIALS_PATH", str(cred_path))
+    credential = OAuthCredential(
+        access="oauth-access-token",
+        refresh="oauth-refresh-token",
+        expires=int((time.time() + 3600) * 1000),
+    )
+    _write_credential_file(cred_path, "openai", credential)
+
+    route = respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=OPENAI_CHAT_RESPONSE)
+    )
+
+    provider = OpenAIProvider(api_key="")
+    response = provider.complete([Message(role="user", content="Hi")])
+
+    assert response.text == "Hello from OpenAI!"
+    assert route.calls
+    assert route.calls[0].request.headers.get("authorization") == "Bearer oauth-access-token"
+
+
+@respx.mock
+def test_openai_validate_passes_with_stored_oauth_credential(
+    tmp_path, monkeypatch
+):
+    cred_path = tmp_path / "credentials.json"
+    monkeypatch.setenv("RICKSHAW_CREDENTIALS_PATH", str(cred_path))
+    credential = OAuthCredential(
+        access="oauth-access-token",
+        refresh="oauth-refresh-token",
+        expires=int((time.time() + 3600) * 1000),
+    )
+    _write_credential_file(cred_path, "openai", credential)
+
+    provider = OpenAIProvider(api_key="")
+    provider.validate()
+
+
+@respx.mock
+def test_openai_seed_api_key_still_works_without_stored_credential(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RICKSHAW_CREDENTIALS_PATH", str(tmp_path / "missing.json"))
+    respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=OPENAI_CHAT_RESPONSE)
+    )
+
+    provider = OpenAIProvider(api_key="sk-test")
+    response = provider.complete([Message(role="user", content="Hi")])
+    assert response.text == "Hello from OpenAI!"
+
     provider = OpenAIProvider(api_key="")
     with pytest.raises(ValueError, match="OPENAI_API_KEY"):
         provider.validate()

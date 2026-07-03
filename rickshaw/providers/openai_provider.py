@@ -202,6 +202,8 @@ class OpenAIProvider(EmbeddingMixin, LLMProvider):
         )
 
     def validate(self) -> None:
+        if _bridge.has_stored_credential(self.name):
+            return
         if not self._api_key:
             raise ValueError(
                 "OPENAI_API_KEY is not set. "

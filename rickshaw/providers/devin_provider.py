@@ -13,6 +13,7 @@ from typing import Any, Iterator
 import httpx
 
 from rickshaw.config import is_local_url
+from rickshaw.providers import _bridge
 from rickshaw.providers.base import (
     Capabilities,
     Effort,
@@ -124,6 +125,8 @@ class DevinProvider(LLMProvider):
         )
 
     def validate(self) -> None:
+        if _bridge.has_stored_credential(self.name):
+            return
         if not self._api_key:
             raise ValueError(
                 "DEVIN_API_KEY is not set. "

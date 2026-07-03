@@ -156,6 +156,8 @@ class AnthropicProvider(LLMProvider):
         )
 
     def validate(self) -> None:
+        if _bridge.has_stored_credential(self.name):
+            return
         if not self._api_key:
             raise ValueError(
                 "ANTHROPIC_API_KEY is not set. "

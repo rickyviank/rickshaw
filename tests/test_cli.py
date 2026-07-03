@@ -101,21 +101,51 @@ def test_main_validate_only_failure(mock_config, mock_build):
         main(["--validate-only"])
 
 
+@patch("rickshaw.tui._run_app")
 @patch("rickshaw.tui._build_provider")
+@patch("rickshaw.tui.load_settings")
 @patch("rickshaw.tui.load_config")
-def test_main_validation_failure_exits_by_default(mock_config, mock_build):
-    """Without --allow-unvalidated, validation failure exits non-zero."""
+def test_main_build_failure_falls_back_to_picker(
+    mock_config, mock_load_settings, mock_build, mock_run
+):
+    """A persisted provider that cannot build falls back to the picker."""
     from rickshaw.config import RickshawConfig
     from rickshaw.tui import main
 
     mock_config.return_value = RickshawConfig()
+    mock_load_settings.return_value = {"provider": "fake"}
+    mock_build.side_effect = ValueError("unknown provider")
+
+    main(["--db-path", ":memory:"])
+
+    mock_run.assert_called_once()
+    _, call_provider, _, _ = mock_run.call_args[0]
+    assert call_provider is None
+
+
+@patch("rickshaw.tui._run_app")
+@patch("rickshaw.tui._build_provider")
+@patch("rickshaw.tui.load_settings")
+@patch("rickshaw.tui.load_config")
+def test_main_validation_failure_falls_back_to_picker(
+    mock_config, mock_load_settings, mock_build, mock_run
+):
+    """Validation failure on launch falls back to the picker."""
+    from rickshaw.config import RickshawConfig
+    from rickshaw.tui import main
+
+    mock_config.return_value = RickshawConfig()
+    mock_load_settings.return_value = {"provider": "openai"}
     provider = MagicMock()
     provider.name = "openai"
     provider.validate.side_effect = ValueError("bad key")
     mock_build.return_value = provider
 
-    with pytest.raises(SystemExit):
-        main(["--provider", "openai"])
+    main(["--db-path", ":memory:"])
+
+    mock_run.assert_called_once()
+    _, call_provider, _, _ = mock_run.call_args[0]
+    assert call_provider is None
 
 
 @patch("rickshaw.tui._run_app")

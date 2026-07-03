@@ -47,6 +47,7 @@ from rickshaw.settings import load_settings, save_settings
 from rickshaw_ai._builtins import default_providers as _builtin_providers
 from rickshaw_ai.credentials.store import FileCredentialStore
 from rickshaw_ai.factory import builtin_models as _builtin_models
+from rickshaw.providers import _bridge
 from rickshaw.providers._bridge import run_sync
 
 # Branding — module-level so cli.py can import and reuse them.
@@ -56,8 +57,6 @@ RICKSHAW_BANNER = f"{RICKSHAW_LOGO} \u00b7 {RICKSHAW_SLOGAN}"
 
 # Where the memory layer persists across sessions (vs. the default ":memory:").
 _DEFAULT_DB_PATH = "rickshaw_memory.db"
-
-_CREDENTIALS_PATH = "~/.rickshaw/credentials.json"
 
 # Slash-commands, used for help text and inline autocomplete.
 _COMMANDS = {
@@ -851,8 +850,7 @@ def make_app(
                 self._write(f"{provider_id} does not support OAuth.", "warn")
                 return
 
-            cred_path = Path(_CREDENTIALS_PATH).expanduser()
-            store = FileCredentialStore(cred_path)
+            store = FileCredentialStore(_bridge.credential_store_path())
             models = _builtin_models(credentials=store)
 
             if info.oauth.mode == "device_code":
@@ -1189,18 +1187,42 @@ def main(argv: list[str] | None = None) -> None:
 
     provider: LLMProvider | None = None
     if provider_name is not None:
-        provider = _build_provider(provider_name, cfg)
-
         try:
+            provider = _build_provider(provider_name, cfg)
             provider.validate()
         except Exception as exc:
-            print(f"Provider validation failed ({provider_name}): {exc}", file=sys.stderr)
-            if args.allow_unvalidated and not args.validate_only:
-                print("--allow-unvalidated set; continuing anyway — calls may fail.\n", file=sys.stderr)
-            else:
+            if args.validate_only:
+                print(
+                    f"Provider validation failed ({provider_name}): {exc}",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
+            if provider is None:
+                print(
+                    f"Could not use provider {provider_name!r}: {exc}. "
+                    "Launching provider picker.",
+                    file=sys.stderr,
+                )
+            elif args.allow_unvalidated:
+                print(
+                    f"Provider validation failed ({provider_name}): {exc}",
+                    file=sys.stderr,
+                )
+                print(
+                    "--allow-unvalidated set; continuing anyway — calls may fail.\n",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Could not use provider {provider_name!r}: {exc}. "
+                    "Launching provider picker.",
+                    file=sys.stderr,
+                )
+                provider = None
 
         if args.validate_only:
+            if provider is None:
+                sys.exit(1)
             print(f"Provider {provider_name!r} validated successfully.")
             return
     elif args.validate_only:

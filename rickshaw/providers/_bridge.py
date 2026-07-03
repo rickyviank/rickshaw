@@ -10,8 +10,10 @@ types.
 from __future__ import annotations
 
 import asyncio
+import os
 import queue
 import threading
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterator
 
 import httpx
@@ -22,6 +24,7 @@ from rickshaw.providers.base import (
     Response,
     TokenUsage,
 )
+from rickshaw_ai._builtins import default_providers
 from rickshaw_ai import (
     GenerateRequest,
     GenerateResult,
@@ -29,7 +32,9 @@ from rickshaw_ai import (
 )
 from rickshaw_ai import Message as AIMessage
 from rickshaw_ai import TextBlock, Tool
-from rickshaw_ai.credentials import ApiKeyCredential, InMemoryCredentialStore
+from rickshaw_ai.credentials import ApiKeyCredential
+from rickshaw_ai.credentials.store import CredentialStore, FileCredentialStore
+from rickshaw_ai.credentials.types import Credential
 from rickshaw_ai.providers import ProviderRuntime, adapter_for
 from rickshaw_ai.registry import ModelInfo, ProviderInfo, RetryPolicy
 from rickshaw_ai.streaming import StreamDone, TextDelta
@@ -131,9 +136,61 @@ def to_response(
 # ---------------------------------------------------------------------------
 
 
+def credential_store_path() -> Path:
+    return Path(
+        os.environ.get("RICKSHAW_CREDENTIALS_PATH", "~/.rickshaw/credentials.json")
+    ).expanduser()
+
+
+def _builtin_info(provider_id: str):
+    for provider in default_providers():
+        if provider.id == provider_id:
+            return provider
+    return None
+
+
+def _enrich(provider: ProviderInfo) -> ProviderInfo:
+    builtin = _builtin_info(provider.id)
+    if builtin is None:
+        return provider
+    return provider.model_copy(
+        update={
+            "oauth": builtin.oauth,
+            "env_keys": builtin.env_keys or provider.env_keys,
+            "auth_methods": builtin.auth_methods,
+        }
+    )
+
+
+class _ResolveStore(CredentialStore):
+    def __init__(
+        self,
+        file_store: FileCredentialStore,
+        seed: dict[str, Credential] | None = None,
+    ) -> None:
+        self._file = file_store
+        self._seed = seed
+
+    async def read(self, provider_id: str) -> Credential | None:
+        cred = await self._file.read(provider_id)
+        if cred is not None:
+            return cred
+        if self._seed is not None:
+            return self._seed.get(provider_id)
+        return None
+
+    async def modify(self, provider_id: str, fn):
+        return await self._file.modify(provider_id, fn)
+
+    async def delete(self, provider_id: str) -> None:
+        await self._file.delete(provider_id)
+
+
 def _runtime(provider: ProviderInfo, api_key: str, http: httpx.AsyncClient) -> ProviderRuntime:
-    initial = {provider.id: ApiKeyCredential(key=api_key)} if api_key else {}
-    store = InMemoryCredentialStore(initial)
+    provider = _enrich(provider)
+    file_store = FileCredentialStore(credential_store_path())
+    seed = {provider.id: ApiKeyCredential(key=api_key)} if api_key else None
+    store = _ResolveStore(file_store, seed)
     return ProviderRuntime(
         provider,
         adapter_for(provider.protocol),
@@ -141,6 +198,16 @@ def _runtime(provider: ProviderInfo, api_key: str, http: httpx.AsyncClient) -> P
         http=http,
         retry=RetryPolicy(max_retries=0),
     )
+
+
+def has_stored_credential(provider_id: str) -> bool:
+    try:
+        return (
+            run_sync(FileCredentialStore(credential_store_path()).read(provider_id))
+            is not None
+        )
+    except Exception:
+        return False
 
 
 def generate(
@@ -176,6 +243,8 @@ __all__ = [
     "to_ai_messages",
     "to_ai_tools",
     "to_response",
+    "credential_store_path",
+    "has_stored_credential",
     "generate",
     "stream_text",
     "GenerateRequest",
