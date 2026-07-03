@@ -39,6 +39,18 @@ def test_parse_defaults():
     assert args.validate_only is False
 
 
+def test_version_flag_prints_version(capsys):
+    from rickshaw.tui import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--version"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out.strip()
+    assert "0.1.1" in out
+    assert out.startswith("rickshaw 0.1.1 (")
+
+
 def test_effort_names_mapping():
     assert _EFFORT_NAMES["low"] == Effort.LOW
     assert _EFFORT_NAMES["medium"] == Effort.MEDIUM

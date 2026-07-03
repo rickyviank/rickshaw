@@ -98,9 +98,16 @@ _TEXTUAL_MISSING_MSG = (
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    from rickshaw import __version__
+
     parser = argparse.ArgumentParser(
         prog="rickshaw",
         description="Multi-LLM provider harness with effort levels.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"rickshaw {__version__} ({os.path.abspath(__file__)})",
     )
     parser.add_argument(
         "--provider",
