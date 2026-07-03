@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 from typing import Any, Awaitable, Callable, Union, get_type_hints
+
+logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, Field, TypeAdapter
 
@@ -62,7 +65,12 @@ def _schema_from_signature(func: Callable[..., Any]) -> dict[str, Any]:
     sig = inspect.signature(func)
     try:
         hints = get_type_hints(func)
-    except Exception:  # pragma: no cover - exotic annotations
+    except Exception as exc:  # pragma: no cover - exotic annotations
+        logger.warning(
+            "Cannot resolve type hints for %s, falling back to "
+            "untyped parameters: %s",
+            func.__qualname__, exc,
+        )
         hints = {}
 
     properties: dict[str, Any] = {}
@@ -75,7 +83,12 @@ def _schema_from_signature(func: Callable[..., Any]) -> dict[str, Any]:
         annotation = hints.get(name, str)
         try:
             schema = TypeAdapter(annotation).json_schema()
-        except Exception:  # pragma: no cover - unresolved annotation
+        except Exception as exc:  # pragma: no cover - unresolved annotation
+            logger.warning(
+                "Cannot derive schema for parameter %r of %s, "
+                "defaulting to string: %s",
+                name, func.__qualname__, exc,
+            )
             schema = {"type": "string"}
         properties[name] = schema
         if param.default is inspect.Parameter.empty:

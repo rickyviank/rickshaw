@@ -132,7 +132,8 @@ def to_response(
 
 
 def _runtime(provider: ProviderInfo, api_key: str, http: httpx.AsyncClient) -> ProviderRuntime:
-    store = InMemoryCredentialStore({provider.id: ApiKeyCredential(key=api_key)})
+    initial = {provider.id: ApiKeyCredential(key=api_key)} if api_key else {}
+    store = InMemoryCredentialStore(initial)
     return ProviderRuntime(
         provider,
         adapter_for(provider.protocol),

@@ -71,6 +71,13 @@ async def _resolve_stored(
     stored: Credential,
 ) -> ResolvedAuth:
     if isinstance(stored, ApiKeyCredential):
+        if not stored.key:
+            raise AuthError(
+                f"stored API key for provider {provider.id!r} is empty; "
+                f"set {', '.join(provider.env_keys) or 'a valid key'} or "
+                f"re-authenticate",
+                provider_id=provider.id,
+            )
         return ResolvedAuth(
             headers=_apply_api_key(provider, stored.key),
             extra=dict(stored.env),

@@ -112,3 +112,31 @@ async def test_file_store_persists_oauth_type(tmp_path):
     cred = await FileCredentialStore(path).read("acme")
     assert isinstance(cred, OAuthCredential)
     assert cred.access == "a"
+
+
+async def test_file_store_corrupt_json_logs_warning(tmp_path, caplog):
+    """A corrupt credential file should log a warning, not crash."""
+    path = tmp_path / "auth.json"
+    path.write_text("{{{invalid json")
+    store = FileCredentialStore(path)
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="rickshaw_ai.credentials.store"):
+        cred = await store.read("acme")
+    assert cred is None
+    assert "corrupt or unreadable" in caplog.text
+
+
+async def test_file_store_invalid_credential_logs_warning(tmp_path, caplog):
+    """An unrecognized credential shape should log a warning per provider."""
+    path = tmp_path / "auth.json"
+    import json
+
+    path.write_text(json.dumps({"bad_provider": {"not": "a credential"}}))
+    store = FileCredentialStore(path)
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="rickshaw_ai.credentials.store"):
+        cred = await store.read("bad_provider")
+    assert cred is None
+    assert "Skipping invalid credential" in caplog.text

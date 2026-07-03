@@ -8,9 +8,12 @@ Bearer`` + the OAuth beta header). Unifies extended thinking into
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, AsyncIterator
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from rickshaw_ai.generate import GenerateRequest, GenerateResult, StopReason, Usage
 from rickshaw_ai.messages import (
@@ -309,7 +312,12 @@ class AnthropicAdapter(ProviderAdapter):
             elif btype == "tool_use":
                 try:
                     args = json.loads(entry["json"]) if entry["json"].strip() else {}
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    logger.warning(
+                        "Malformed tool-call arguments for %r in stream, "
+                        "defaulting to empty: %s",
+                        block.get("name", "?"), exc,
+                    )
                     args = {}
                 call = ToolCall(id=block.get("id", ""), name=block.get("name", ""), arguments=args)
                 yield ToolCallEnd(call=call)

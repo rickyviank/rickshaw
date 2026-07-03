@@ -9,9 +9,12 @@ classic ``{"role", "content"}`` shape.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, AsyncIterator
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from rickshaw_ai.generate import GenerateRequest, GenerateResult, StopReason, Usage
 from rickshaw_ai.messages import (
@@ -155,7 +158,12 @@ def _parse_tool_calls(raw_calls: list[dict[str, Any]]) -> list[ToolUseBlock]:
         args_str = func.get("arguments", "{}")
         try:
             args = json.loads(args_str) if args_str else {}
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning(
+                "Malformed tool-call arguments for %r, "
+                "defaulting to empty: %s",
+                func.get("name", "?"), exc,
+            )
             args = {}
         blocks.append(
             ToolUseBlock(id=rc.get("id", ""), name=func.get("name", ""), arguments=args)

@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol, Union, runtime_checkable
 
 from pydantic import TypeAdapter
+
+logger = logging.getLogger(__name__)
 
 from rickshaw_ai.credentials.types import (
     ApiKeyCredential,
@@ -120,13 +123,22 @@ class FileCredentialStore:
             return {}
         try:
             raw = json.loads(self.path.read_text())
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "Credential file %s is corrupt or unreadable, "
+                "starting with empty credentials: %s",
+                self.path, exc,
+            )
             return {}
         out: dict[str, Credential] = {}
         for pid, data in (raw or {}).items():
             try:
                 out[pid] = _ADAPTER.validate_python(data)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Skipping invalid credential for provider %r: %s",
+                    pid, exc,
+                )
                 continue
         return out
 
@@ -188,13 +200,24 @@ class FileCredentialStore:
         await self.modify(provider_id, _drop)
 
 
+_FLOCK_WARNED = False
+
+
 def _flock(fh) -> None:  # pragma: no cover - platform dependent
+    global _FLOCK_WARNED
     try:
         import fcntl
 
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-    except (ImportError, OSError):
-        pass
+    except ImportError:
+        if not _FLOCK_WARNED:
+            logger.warning(
+                "fcntl unavailable; credential file locking disabled. "
+                "Concurrent writes may corrupt the credential store."
+            )
+            _FLOCK_WARNED = True
+    except OSError as exc:
+        logger.warning("Failed to acquire credential file lock: %s", exc)
 
 
 def _funlock(fh) -> None:  # pragma: no cover - platform dependent

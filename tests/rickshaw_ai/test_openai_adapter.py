@@ -162,3 +162,46 @@ async def test_streaming_tool_calls_assemble_and_match_nonstream():
     assert done.result.tool_calls[0].arguments == {"city": "Paris"}
     assert any(e.type == "tool_call_start" for e in events)
     assert any(e.type == "tool_call_end" for e in events)
+
+
+@respx.mock
+async def test_malformed_tool_call_args_logs_warning(caplog):
+    """Malformed tool-call JSON arguments should log a warning."""
+    import logging
+
+    bad_response = {
+        "model": "test-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": "{{not json}}",
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    models = make_models(
+        protocol="openai", provider_id="oai", base_url="https://oai.test/v1"
+    )
+    respx.post("https://oai.test/v1/chat/completions").respond(json=bad_response)
+    with caplog.at_level(
+        logging.WARNING, logger="rickshaw_ai.providers.openai_compatible"
+    ):
+        result = await models.get("oai/test-model").generate(
+            GenerateRequest(messages=[Message.user("hi")])
+        )
+    assert result.tool_calls[0].arguments == {}
+    assert "Malformed tool-call arguments" in caplog.text

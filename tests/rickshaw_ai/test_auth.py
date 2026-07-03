@@ -60,6 +60,15 @@ async def test_no_credential_raises(monkeypatch):
             await resolve_auth(_provider(), store, http)
 
 
+async def test_empty_stored_api_key_raises(monkeypatch):
+    """A stored ApiKeyCredential with an empty key must raise AuthError."""
+    monkeypatch.delenv("ACME_API_KEY", raising=False)
+    store = InMemoryCredentialStore({"acme": ApiKeyCredential(key="")})
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(AuthError, match="stored API key.*is empty"):
+            await resolve_auth(_provider(), store, http)
+
+
 async def test_api_key_injects_provider_env():
     store = InMemoryCredentialStore(
         {"acme": ApiKeyCredential(key="k", env={"CLOUDFLARE_ACCOUNT_ID": "acct"})}
