@@ -19,13 +19,36 @@ from __future__ import annotations
 
 import logging
 import uuid
+from contextlib import suppress
 from pathlib import Path
+from multiprocessing import resource_tracker, shared_memory
 
 from rickshaw.memory.record import MemoryRecord, MemoryScope
 
 logger = logging.getLogger(__name__)
 
 _COLLECTION_NAME = "memories"
+
+
+def _prestart_resource_tracker() -> None:
+    """Start multiprocessing's resource tracker while stdio still has real fds."""
+    try:
+        tracker = resource_tracker._resource_tracker
+        if getattr(tracker, "_pid", None) is not None:
+            return
+    except Exception:
+        return
+
+    # Textual workers can replace stderr with a fake stream whose fileno() is
+    # -1. If the resource tracker is first spawned there, fork_exec rejects the
+    # invalid fd list; warming it up here keeps later turn-time multiprocessing
+    # use from respawning under redirected stdio.
+    with suppress(Exception):
+        shm = shared_memory.SharedMemory(create=True, size=1)
+        try:
+            shm.close()
+        finally:
+            shm.unlink()
 
 
 def chroma_available() -> bool:
@@ -70,6 +93,7 @@ class ChromaVectorIndex:
                 name=name,
                 metadata={"hnsw:space": "cosine"},
             )
+            _prestart_resource_tracker()
             self._enabled = True
         except Exception as exc:  # ImportError, init failure, etc.
             logger.warning(

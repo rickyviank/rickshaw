@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import subprocess
+import sys
+import textwrap
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -394,6 +399,97 @@ def test_store_chroma_index_path():
     store.delete(r_near.id)
     ids = [rec.id for rec, _ in store.search(near, limit=2)]
     assert r_near.id not in ids
+
+
+def test_resource_tracker_warmup_prevents_fake_stderr_crash():
+    repo_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(repo_root), *[p for p in sys.path if p]]
+    )
+
+    failure_script = textwrap.dedent(
+        """
+        from multiprocessing import shared_memory
+        from unittest.mock import patch
+        import traceback
+
+        class FakeStderr:
+            def write(self, *a, **k): pass
+            def flush(self): pass
+            def isatty(self): return True
+            def fileno(self): return -1
+
+        try:
+            with patch('sys.stderr', FakeStderr()):
+                shm = shared_memory.SharedMemory(create=True, size=1)
+                print('unexpected-success', shm.name)
+                shm.close()
+                shm.unlink()
+        except Exception:
+            traceback.print_exc()
+            raise SystemExit(1)
+        """
+    )
+    failure = subprocess.run(
+        [sys.executable, "-c", failure_script],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert failure.returncode == 1
+    assert "bad value(s) in fds_to_keep" in failure.stderr
+    assert "resource_tracker.py" in failure.stderr
+
+    success_script = textwrap.dedent(
+        """
+        import traceback
+        from multiprocessing import shared_memory
+        from unittest.mock import patch
+        from rickshaw.memory._chroma_index import _prestart_resource_tracker
+
+        class FakeStderr:
+            def write(self, *a, **k): pass
+            def flush(self): pass
+            def isatty(self): return True
+            def fileno(self): return -1
+
+        _prestart_resource_tracker()
+        try:
+            with patch('sys.stderr', FakeStderr()):
+                shm = shared_memory.SharedMemory(create=True, size=1)
+                print('ok', shm.name)
+                shm.close()
+                shm.unlink()
+        except Exception:
+            traceback.print_exc()
+            raise SystemExit(1)
+        """
+    )
+    success = subprocess.run(
+        [sys.executable, "-c", success_script],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert success.returncode == 0, success.stderr
+    assert success.stdout.startswith("ok ")
+
+
+@pytest.mark.skipif(not chroma_available(), reason="chromadb not installed")
+def test_chroma_index_initialization_warms_resource_tracker(monkeypatch):
+    pytest.importorskip("chromadb")
+    calls = []
+
+    def fake_warmup() -> None:
+        calls.append(True)
+
+    monkeypatch.setattr("rickshaw.memory._chroma_index._prestart_resource_tracker", fake_warmup)
+    store = MemoryStore(vector_dim=8, use_vector_index=True)
+    assert store.vector_search_enabled is True
+    assert calls == [True]
 
 
 # ---------------------------------------------------------------------------
