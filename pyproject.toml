@@ -16,6 +16,14 @@ dependencies = [
     "pyyaml>=6.0.1",
     "textual>=0.50",
     "rich>=13.0",
+    # Default offline semantic embedder. The potion-base-4M model is vendored
+    # in rickshaw/memory/models/ so a fresh install works fully air-gapped.
+    "model2vec>=0.8.0",
+    "tokenizers>=0.20",
+    "safetensors>=0.4.0",
+    # sqlite-vec provides vec0 KNN inside SQLite; falls back to brute-force
+    # cosine when the extension can't load.
+    "sqlite-vec>=0.1.9",
 ]
 
 [project.optional-dependencies]
@@ -24,8 +32,13 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "respx>=0.21.0",
 ]
-# Optional: indexed vector search via ChromaDB. Falls back to brute-force
-# cosine when unavailable. See rickshaw/memory/_chroma_index.py.
+# Optional: higher-quality ONNX sentence embeddings (bge-small-en-v1.5).
+# One-time model fetch then offline. See rickshaw/memory/embedder.py.
+embed = [
+    "fastembed>=0.3.0",
+]
+# Optional: indexed vector search via ChromaDB (legacy, superseded by
+# sqlite-vec). Kept for backward compatibility.
 vector = [
     "chromadb>=0.5.0",
 ]
@@ -41,6 +54,11 @@ rickshaw = "rickshaw.tui:main"
 
 [tool.setuptools.packages.find]
 include = ["rickshaw*"]
+
+# Include the vendored Model2Vec model files in the package so a fresh
+# install works fully air-gapped with no model download.
+[tool.setuptools.package-data]
+"rickshaw.memory" = ["models/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

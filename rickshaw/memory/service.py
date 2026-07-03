@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rickshaw.memory._math import cosine_similarity
-from rickshaw.memory.embedder import Embedder, TFIDFEmbedder
+from rickshaw.memory.embedder import Embedder, Model2VecEmbedder, TFIDFEmbedder
 from rickshaw.memory.ranker import Ranker
 from rickshaw.memory.record import MemoryRecord, MemoryScope, MemoryType
 from rickshaw.memory.store import MemoryStore
@@ -34,11 +34,28 @@ class MemoryService:
         dedupe_threshold: float = _DEDUPE_THRESHOLD,
         context_budget: int = 10,
     ) -> None:
-        self.embedder = embedder or TFIDFEmbedder()
+        self.embedder = embedder or Model2VecEmbedder()
         self.store = store or MemoryStore(db_path, vector_dim=self.embedder.dimension)
         self.ranker = ranker or Ranker()
         self.dedupe_threshold = dedupe_threshold
         self.context_budget = context_budget
+        # If the embedder tier changed (dimension mismatch), re-embed all
+        # existing records so they live in the new vector space. This makes
+        # tier switches safe without losing stored memories.
+        self._migrate_embedding_dimension()
+
+    def _migrate_embedding_dimension(self) -> None:
+        """Re-embed all records when the embedder dimension changes (tier switch)."""
+        records = self.store.all_records()
+        if not records:
+            return
+        target_dim = self.embedder.dimension
+        needs_reembed = any(len(r.embedding) != target_dim for r in records)
+        if not needs_reembed:
+            return
+        for record in records:
+            record.embedding = self.embedder.embed(record.text)
+            self.store.put(record)
 
     def assemble_context(
         self,

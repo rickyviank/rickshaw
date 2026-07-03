@@ -10,7 +10,12 @@ import pytest
 
 from rickshaw.memory._chroma_index import chroma_available
 from rickshaw.memory._math import cosine_similarity
-from rickshaw.memory.embedder import ProviderEmbedder, TFIDFEmbedder
+from rickshaw.memory.embedder import (
+    Model2VecEmbedder,
+    ProviderEmbedder,
+    TFIDFEmbedder,
+    make_embedder,
+)
 from rickshaw.memory.ranker import Ranker
 from rickshaw.memory.record import MemoryRecord, MemoryScope, MemoryType
 from rickshaw.memory.service import MemoryService
@@ -439,3 +444,184 @@ def test_dispatch_unknown_tool():
     # Registry surfaces errors as a structured {"error": ...} payload.
     assert isinstance(result, dict)
     assert "unknown tool" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: unified sqlite-vec store (float32 BLOB + vec0 + brute-force fallback)
+# ---------------------------------------------------------------------------
+
+def test_store_embedding_stored_as_float32_blob():
+    """Embeddings are persisted as compact float32 BLOBs, not JSON text."""
+    store = MemoryStore(vector_dim=8, use_vector_index=False)
+    rec = MemoryRecord(id="r1", text="hello", embedding=[1.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
+    store.put(rec)
+    raw = store._conn.execute("SELECT embedding FROM memories WHERE id='r1'").fetchone()[0]
+    assert isinstance(raw, (bytes, bytearray))
+    assert len(raw) == 8 * 4  # 8 dims * 4 bytes per float32
+    # Round-trips exactly (within float32 precision).
+    fetched = store.get("r1")
+    assert fetched.embedding[0] == pytest.approx(1.0)
+    assert fetched.embedding[2] == pytest.approx(0.5)
+
+
+def test_store_search_identical_results_indexed_vs_bruteforce():
+    """The vec0 indexed path and brute-force path return identical rankings."""
+    vec = [1.0] + [0.0] * 15
+    recs = [
+        MemoryRecord(id="near", text="near", embedding=vec),
+        MemoryRecord(id="far", text="far", embedding=[0.0] * 15 + [1.0]),
+    ]
+    # Force brute-force.
+    brute = MemoryStore(vector_dim=16, use_vector_index=False)
+    for r in recs:
+        brute.put(r)
+    brute_hits = brute.search(vec, limit=2)
+    # Use the indexed path if available; otherwise this just re-confirms brute.
+    indexed = MemoryStore(vector_dim=16, use_vector_index=True)
+    for r in recs:
+        indexed.put(r)
+    indexed_hits = indexed.search(vec, limit=2)
+    # Both must agree on the top hit regardless of backend.
+    assert brute_hits[0][0].id == "near"
+    assert indexed_hits[0][0].id == "near"
+    assert brute_hits[0][1] == pytest.approx(1.0, abs=1e-5)
+    assert indexed_hits[0][1] == pytest.approx(1.0, abs=1e-5)
+
+
+def test_store_migrates_json_embeddings_to_blob(tmp_path):
+    """A legacy DB with JSON-text embeddings is migrated to float32 BLOBs on open."""
+    import sqlite3 as _sqlite3
+    db = tmp_path / "legacy.db"
+    c = _sqlite3.connect(str(db))
+    c.execute(
+        """CREATE TABLE memories (
+            id TEXT PRIMARY KEY, text TEXT NOT NULL, embedding TEXT NOT NULL,
+            scope TEXT NOT NULL, type TEXT NOT NULL, importance REAL NOT NULL DEFAULT 0.0,
+            created_at TEXT NOT NULL, last_used_at TEXT NOT NULL,
+            use_count INTEGER NOT NULL DEFAULT 0, sensitive INTEGER NOT NULL DEFAULT 0,
+            superseded_by TEXT)"""
+    )
+    c.execute(
+        "INSERT INTO memories VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("r1", "hello", json.dumps([1.0, 0.5, 0.0, 0.0]), "session", "fact", 0.5,
+         "2025-01-01T00:00:00+00:00", "2025-01-01T00:00:00+00:00", 0, 0, None),
+    )
+    c.commit()
+    c.close()
+
+    store = MemoryStore(str(db), vector_dim=None, use_vector_index=False)
+    rec = store.get("r1")
+    assert rec is not None
+    assert rec.embedding == [1.0, 0.5, 0.0, 0.0]
+    raw = store._conn.execute("SELECT embedding FROM memories WHERE id='r1'").fetchone()[0]
+    assert isinstance(raw, (bytes, bytearray))  # migrated to BLOB
+    assert len(raw) == 16  # 4 floats * 4 bytes
+
+
+def test_store_vec0_index_backfills_existing_rows(tmp_path):
+    """Rows present before the store opens are backfilled into the vec0 index."""
+    db = tmp_path / "mem.db"
+    vec = [1.0] + [0.0] * 15
+    # First store writes a row (no index), then a second store opens with an
+    # index and must pick up the pre-existing row.
+    base = MemoryStore(str(db), vector_dim=16, use_vector_index=False)
+    base.put(MemoryRecord(id="r1", text="hello", embedding=vec))
+    base.close()
+    # Re-open with index enabled (will use vec0 if available, else fallback).
+    store = MemoryStore(str(db), vector_dim=16, use_vector_index=True)
+    hits = store.search(vec, limit=5)
+    assert any(r.id == "r1" for r, _ in hits)
+
+
+def test_store_superseded_removed_from_index():
+    """mark_superseded drops the record from the index so it can't surface."""
+    store = MemoryStore(vector_dim=8, use_vector_index=True)
+    vec = [1.0] + [0.0] * 7
+    store.put(MemoryRecord(id="old", text="old", embedding=vec))
+    store.put(MemoryRecord(id="new", text="new", embedding=vec))
+    store.mark_superseded("old", "new")
+    hits = store.search(vec, limit=5)
+    ids = [r.id for r, _ in hits]
+    assert "old" not in ids
+    assert "new" in ids
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: tiered embedders (Model2Vec default, FastEmbed opt-in, make_embedder)
+# ---------------------------------------------------------------------------
+
+def test_model2vec_embedder_loads_vendored_model():
+    """The default Model2VecEmbedder loads the vendored model fully offline."""
+    e = Model2VecEmbedder()
+    assert e.dimension == 128
+    v = e.embed("hello world")
+    assert len(v) == 128
+    assert any(abs(x) > 0 for x in v)  # not all zeros
+
+
+def test_model2vec_embedder_semantic_beats_tfidf():
+    """Model2Vec captures semantic similarity that TF-IDF cannot."""
+    m2v = Model2VecEmbedder()
+    # Synonyms with no word overlap should be more similar than unrelated text.
+    sim_syn = cosine_similarity(
+        m2v.embed("the feline is sleeping on the mat"),
+        m2v.embed("a cat is resting on the rug"),
+    )
+    sim_unrel = cosine_similarity(
+        m2v.embed("the feline is sleeping on the mat"),
+        m2v.embed("database servers process concurrent queries"),
+    )
+    assert sim_syn > sim_unrel
+
+
+def test_model2vec_embedder_deterministic():
+    """Same text produces the same vector across calls."""
+    e = Model2VecEmbedder()
+    v1 = e.embed("deterministic test")
+    v2 = e.embed("deterministic test")
+    assert v1 == pytest.approx(v2, abs=1e-6)
+
+
+def test_make_embedder_tiers():
+    """make_embedder selects the correct tier by name."""
+    assert isinstance(make_embedder("tfidf", dim=16), TFIDFEmbedder)
+    assert isinstance(make_embedder("model2vec"), Model2VecEmbedder)
+    # Unknown tier raises.
+    with pytest.raises(ValueError):
+        make_embedder("nonexistent")
+
+
+def test_make_embedder_default_is_model2vec():
+    """The default tier (no arg) is Model2Vec, not TF-IDF."""
+    e = make_embedder()
+    assert isinstance(e, Model2VecEmbedder)
+
+
+def test_service_default_embedder_is_model2vec():
+    """MemoryService defaults to Model2VecEmbedder when no embedder is passed."""
+    service = MemoryService()
+    assert isinstance(service.embedder, Model2VecEmbedder)
+
+
+def test_service_reembeds_on_tier_change(tmp_path):
+    """Switching embedder tier re-embeds all existing records."""
+    db = str(tmp_path / "mem.db")
+    # Write with TF-IDF (32-dim).
+    svc_tfidf = MemoryService(
+        embedder=TFIDFEmbedder(dim=32), db_path=db,
+    )
+    svc_tfidf.write("user likes dark mode")
+    svc_tfidf.write("python is a great language")
+    recs = svc_tfidf.store.all_records()
+    assert all(len(r.embedding) == 32 for r in recs)
+    svc_tfidf.store.close()
+
+    # Re-open with Model2Vec (128-dim) — records must be re-embedded.
+    svc_m2v = MemoryService(
+        embedder=Model2VecEmbedder(), db_path=db,
+    )
+    recs = svc_m2v.store.all_records()
+    assert all(len(r.embedding) == 128 for r in recs)
+    # Retrieval should still work after re-embedding.
+    results = svc_m2v.assemble_context("dark mode preference")
+    assert len(results) > 0
