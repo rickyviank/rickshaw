@@ -54,7 +54,7 @@ ANTHROPIC = ProviderInfo(
         authorize_url="https://claude.ai/oauth/authorize",
         token_url="https://console.anthropic.com/v1/oauth/token",
         client_id="9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-        scopes=["org:create_api_key", "user:profile", "user:inference"],
+        scopes=["user:profile", "user:inference"],
         redirect_uri="https://console.anthropic.com/oauth/code/callback",
         use_pkce=True,
     ),

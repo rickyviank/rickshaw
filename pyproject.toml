@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rickshaw"
-version = "0.1.0"
+version = "0.1.1"
 description = "A multi-LLM provider harness with normalized interfaces and effort levels"
 readme = "README.md"
 license = {text = "MIT"}

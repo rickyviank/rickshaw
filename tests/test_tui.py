@@ -134,7 +134,7 @@ def test_oauth_authorize_url_encoding_and_quirks():
         code_challenge="challenge",
         extra=tui._oauth_quirk("anthropic")["authorize_extra"],
     )
-    assert "scope=org%3Acreate_api_key%20user%3Aprofile%20user%3Ainference" in anthro_url
+    assert "scope=user%3Aprofile%20user%3Ainference" in anthro_url
     assert "code=true" in anthro_url
     assert " " not in anthro_url
     assert ":create_api_key" not in anthro_url

@@ -39,6 +39,44 @@ def test_parse_defaults():
     assert args.validate_only is False
 
 
+def test_version_flag_prints_version(capsys):
+    from rickshaw.tui import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--version"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out.strip()
+    assert "0.1.1" in out
+    assert out.startswith("rickshaw 0.1.1 (")
+
+
+def test_oauth_url_flag_prints_authorize_url(capsys):
+    from rickshaw.tui import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--oauth-url", "anthropic"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out.strip()
+    assert "claude.ai/oauth/authorize" in out
+    assert "code_challenge=" in out
+    assert "code_challenge_method=S256" in out
+    assert "code=true" in out
+    assert "client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e" in out
+
+
+def test_oauth_url_flag_unknown_provider_exits_nonzero(capsys):
+    from rickshaw.tui import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--oauth-url", "devin"])
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "unknown provider 'devin'" in err
+
+
 def test_effort_names_mapping():
     assert _EFFORT_NAMES["low"] == Effort.LOW
     assert _EFFORT_NAMES["medium"] == Effort.MEDIUM
