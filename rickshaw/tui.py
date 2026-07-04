@@ -115,6 +115,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Provider name (e.g. openai, devin). Overrides config/env.",
     )
     parser.add_argument(
+        "--oauth-url",
+        metavar="PROVIDER",
+        default=None,
+        help="Print the OAuth authorize URL for PROVIDER and exit.",
+    )
+    parser.add_argument(
         "--effort",
         choices=["low", "medium", "high"],
         default=None,
@@ -197,6 +203,31 @@ def _build_authorize_url(oauth_cfg, *, state: str, code_challenge: str | None, e
         params["code_challenge_method"] = "S256"
     params.update(extra)
     return f"{oauth_cfg.authorize_url}?{urlencode(params, quote_via=quote)}"
+
+
+def _build_auth_code_authorize_url(provider_id: str, models) -> tuple[str, str | None, str]:
+    from rickshaw_ai.auth.oauth import generate_pkce
+    import base64, os as _os
+
+    try:
+        info = models.provider_info(provider_id)
+    except KeyError as exc:
+        raise ValueError(f"unknown provider {provider_id!r}") from exc
+    oauth_cfg = info.oauth
+    if oauth_cfg is None:
+        raise ValueError(f"provider {provider_id!r} does not support OAuth")
+
+    verifier = challenge = None
+    if oauth_cfg.use_pkce:
+        verifier, challenge = generate_pkce()
+    state = base64.urlsafe_b64encode(_os.urandom(16)).rstrip(b"=").decode()
+    url = _build_authorize_url(
+        oauth_cfg,
+        state=state,
+        code_challenge=challenge,
+        extra=_oauth_quirk(provider_id)["authorize_extra"],
+    )
+    return url, verifier, state
 
 
 def make_app(
@@ -922,21 +953,7 @@ def make_app(
         @work(thread=True, exclusive=True, group="login")
         def _run_auth_code_login_start(self, provider_id, models, open_browser):
             """Start auth-code login: build authorize URL and open browser."""
-            from rickshaw_ai.auth.oauth import generate_pkce
-            import base64, os as _os
-
-            info = models.provider_info(provider_id)
-            oauth_cfg = info.oauth
-            verifier = challenge = None
-            if oauth_cfg.use_pkce:
-                verifier, challenge = generate_pkce()
-            state = base64.urlsafe_b64encode(_os.urandom(16)).rstrip(b"=").decode()
-            url = _build_authorize_url(
-                oauth_cfg,
-                state=state,
-                code_challenge=challenge,
-                extra=_oauth_quirk(provider_id)["authorize_extra"],
-            )
+            url, verifier, state = _build_auth_code_authorize_url(provider_id, models)
             open_browser(url)
             # Save PKCE state for later code exchange
             self.call_from_thread(self._save_login_pkce, provider_id, verifier, state)
@@ -1227,6 +1244,17 @@ def _run_app(
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
+
+    if args.oauth_url:
+        models = _builtin_models(credentials=FileCredentialStore(_bridge.credential_store_path()))
+        try:
+            url, _, _ = _build_auth_code_authorize_url(args.oauth_url, models)
+        except Exception as exc:
+            print(f"{exc}", file=sys.stderr)
+            sys.exit(1)
+        print(url)
+        sys.exit(0)
+
     cfg = load_config()
 
     settings = load_settings()
