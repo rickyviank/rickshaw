@@ -8,6 +8,7 @@ need the module to import, which does not require Textual at import time.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any, Iterator
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs
@@ -120,6 +121,83 @@ def test_parse_args_defaults_and_overrides():
     assert args.provider == "openai"
     assert args.effort == "high"
     assert args.db_path == "x.db"
+
+
+def test_status_segment_value_context_missing_and_warns():
+    warnings: list[str] = []
+
+    assert tui._status_segment_value("context", model_info=None) == "—"
+    assert (
+        tui._status_segment_value("context", model_info=None, warnings=warnings)
+        == "—"
+    )
+    assert warnings == ["context window unknown for the active model"]
+
+
+def test_status_segment_value_context_uses_window_and_percent():
+    warnings: list[str] = []
+    model_info = SimpleNamespace(context_window=0)
+
+    assert (
+        tui._status_segment_value("context", model_info=model_info, warnings=warnings)
+        == "—"
+    )
+    assert warnings == ["context window unknown for the active model"]
+
+    model_info = SimpleNamespace(context_window=200000)
+    assert (
+        tui._status_segment_value(
+            "context",
+            model_info=model_info,
+            context_tokens=100000,
+        )
+        == "50%"
+    )
+
+
+def test_status_segment_value_price_missing_and_formats():
+    warnings: list[str] = []
+    model_info = SimpleNamespace(pricing=SimpleNamespace(input=0.0, output=0.0))
+
+    assert (
+        tui._status_segment_value("price", model_info=model_info, warnings=warnings)
+        == "—"
+    )
+    assert warnings == ["pricing unknown for the active model"]
+
+    model_info = SimpleNamespace(pricing=SimpleNamespace(input=3.0, output=0.0))
+    assert (
+        tui._status_segment_value(
+            "price",
+            model_info=model_info,
+            session_cost=0.1234,
+        )
+        == "$0.1234"
+    )
+
+
+def test_status_segment_value_passthrough_and_unknown_segment():
+    assert tui._status_segment_value("provider", provider="anthropic") == "anthropic"
+    assert tui._status_segment_value("provider", provider=None) == "—"
+    assert tui._status_segment_value("model", model="claude") == "claude"
+    assert tui._status_segment_value("model", model=None) == "—"
+    assert tui._status_segment_value("effort", effort="medium") == "medium"
+    assert tui._status_segment_value("effort", effort=None) == "—"
+    assert tui._status_segment_value("tokens", session_tokens=0) == "0 tok"
+    assert tui._status_segment_value("tokens", session_tokens=None) == "—"
+
+    warnings: list[str] = []
+    assert tui._status_segment_value("nope", warnings=warnings) == "—"
+    assert warnings == ["unknown status-bar segment: 'nope'"]
+
+
+def test_status_segment_value_warning_deduplicates():
+    warnings: list[str] = []
+
+    tui._status_segment_value("context", model_info=None, warnings=warnings)
+    tui._status_segment_value("context", model_info=None, warnings=warnings)
+
+    assert warnings == ["context window unknown for the active model"]
 
 
 def test_oauth_authorize_url_encoding_and_quirks():
@@ -343,6 +421,38 @@ async def test_app_runs_a_turn_through_orchestrator():
 
 
 @pytest.mark.asyncio
+async def test_app_degraded_turn_shows_themed_banner():
+    pytest.importorskip("textual")
+    from rickshaw.orchestrator import TurnResult
+
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+    orch.run_turn = lambda text, on_delta=None: TurnResult(
+        text="local answer", degraded=True
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "hi"
+        await pilot.press("enter")
+
+        banner_found = False
+        for _ in range(60):
+            transcript = app.query_one("#transcript").query("Static")
+            for widget in transcript:
+                if "degraded-banner" in widget.classes and (
+                    "provider unreachable — showing local memory only"
+                    in str(widget.render())
+                ):
+                    banner_found = True
+                    break
+            if banner_found:
+                break
+            await pilot.pause(0.05)
+
+        assert banner_found
+
+
+@pytest.mark.asyncio
 async def test_app_effort_command_updates_orchestrator():
     pytest.importorskip("textual")
     orch, provider, _memory = _make_orchestrator()
@@ -441,6 +551,27 @@ async def test_app_provider_add_registers_provider():
             for w in app.query_one("#transcript").query("Static")
         )
         assert "provider registered" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_warn_missing_metadata_writes_warn_statics():
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test():
+        warnings = app._warn_missing_metadata(None)
+        assert warnings == [
+            "context window unknown for the active model",
+            "pricing unknown for the active model",
+        ]
+
+        statics = [
+            widget
+            for widget in app.query_one("#transcript").query("Static")
+            if "warn" in widget.classes and "⚠" in str(widget.render())
+        ]
+        assert len(statics) == 2
 
 
 @pytest.mark.asyncio

@@ -90,6 +90,70 @@ _COMMANDS = {
 _DEFAULT_HINT = "/help  ·  esc interrupt  ·  ^c quit"
 _USER_MARK = "[#d98a3d]\u203a[/]"  # amber angle-quote before each user message
 
+#: Fixed vocabulary of status-bar segments (PRD D7/D9; shared J6/J8 convention).
+_STATUS_SEGMENTS = ("provider", "model", "effort", "context", "tokens", "price")
+#: Placeholder rendered for any segment whose data is missing (C8, PRD J7).
+_MISSING_SEGMENT = "\u2014"  # em dash
+
+
+def _status_segment_value(
+    name: str,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    model_info: object | None = None,
+    context_tokens: int = 0,
+    session_tokens: int | None = 0,
+    session_cost: float | None = None,
+    warnings: list[str] | None = None,
+) -> str:
+    """Compute a single status-bar segment's display value.
+
+    Returns the em-dash placeholder (``\u2014``) for any segment whose data is
+    missing or unavailable, and never raises (C8). ``context`` needs the active
+    model's ``context_window`` (from ``rickshaw_ai`` ``ModelInfo``); ``price``
+    needs its ``pricing`` defaults. When *warnings* is a list, a short
+    human-readable reason is appended (de-duplicated) for each missing-metadata
+    segment so callers can surface a themed warning (PRD J7 step 2).
+
+    Shared by the status-bar journeys (J6/J8); J7 owns the missing-data path.
+    """
+
+    def _warn(msg: str) -> None:
+        if warnings is not None and msg not in warnings:
+            warnings.append(msg)
+
+    if name == "provider":
+        return provider or _MISSING_SEGMENT
+    if name == "model":
+        return model or _MISSING_SEGMENT
+    if name == "effort":
+        return effort or _MISSING_SEGMENT
+    if name == "context":
+        window = getattr(model_info, "context_window", 0) or 0
+        if window <= 0:
+            _warn("context window unknown for the active model")
+            return _MISSING_SEGMENT
+        pct = round(100 * max(context_tokens, 0) / window)
+        return f"{pct}%"
+    if name == "tokens":
+        if session_tokens is None:
+            return _MISSING_SEGMENT
+        return f"{session_tokens} tok"
+    if name == "price":
+        pricing = getattr(model_info, "pricing", None)
+        in_rate = getattr(pricing, "input", 0.0) or 0.0
+        out_rate = getattr(pricing, "output", 0.0) or 0.0
+        if in_rate <= 0 and out_rate <= 0:
+            _warn("pricing unknown for the active model")
+            return _MISSING_SEGMENT
+        return f"${(session_cost or 0.0):.4f}"
+    # Unknown segment name — ignore with a warning (PRD D9/J8).
+    _warn(f"unknown status-bar segment: {name!r}")
+    return _MISSING_SEGMENT
+
+
 _TEXTUAL_MISSING_MSG = (
     "The Rickshaw terminal UI requires Textual, which is not installed.\n"
     "Install it with:\n\n"
@@ -276,6 +340,8 @@ def make_app(
         # Near-monochrome with a single amber accent; hairline rules separate
         # turns. Chrome is intentionally almost invisible.
         CSS = """
+        $rk-warn: #d98a3d;
+        $rk-error: #d16a5a;
         Screen { layout: vertical; background: #0e0f11; }
         #head { height: auto; color: #4b5563; padding: 1 3 0 3; }
         #transcript {
@@ -297,10 +363,9 @@ def make_app(
         .u { color: #dfe2e7; }
         .a { color: #9aa0a8; }
         .meta { color: #5c6370; }
-        .warn { color: #c98a3d; }
+        .warn { color: $rk-warn; }
         .degraded-banner {
-            color: #1a1a1a;
-            background: #c98a3d;
+            color: $rk-error;
             text-style: bold;
             padding: 0 1;
         }
@@ -414,6 +479,19 @@ def make_app(
 
         def _set_hint(self, text: str) -> None:
             self.query_one("#hint", Static).update(text)
+
+        def _warn_missing_metadata(self, model_info: object | None) -> list[str]:
+            """Surface themed warnings for status-bar segments whose model
+            metadata is missing (context window / pricing), rendering ``—`` for
+            them rather than failing (C8, PRD J7 step 2). Returns the warnings
+            emitted so callers/tests can inspect them.
+            """
+            warnings: list[str] = []
+            for name in ("context", "price"):
+                _status_segment_value(name, model_info=model_info, warnings=warnings)
+            for msg in warnings:
+                self._write(f"\u26a0 {msg}", "warn")
+            return warnings
 
         # ---- input handling --------------------------------------------
 
