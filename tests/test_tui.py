@@ -317,6 +317,101 @@ def test_make_app_builds_instance():
 
 
 @pytest.mark.asyncio
+async def test_app_slash_opens_command_menu():
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt")
+        prompt.value = "/"
+        await pilot.pause()
+        menu = app.query_one("#slashmenu")
+        rendered = str(menu.render())
+        assert menu.display is True
+        assert "/help" in rendered
+        assert "/model" in rendered
+        assert "/effort" in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_slash_filters_command_menu():
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/mo"
+        await pilot.pause()
+        menu = app.query_one("#slashmenu")
+        rendered = str(menu.render())
+        assert menu.display is True
+        assert "/model" in rendered
+        assert "/models" in rendered
+        assert "/help" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_app_slash_effort_value_picker_applies_selection():
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    orch.effort = Effort.LOW
+    app = tui.make_app(orch, provider, Effort.LOW)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/effort "
+        await pilot.pause()
+        menu = app.query_one("#slashmenu")
+        rendered = str(menu.render())
+        assert menu.display is True
+        assert "low" in rendered
+        assert "medium" in rendered
+        assert "high" in rendered
+
+        await pilot.press("down")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert orch.effort == Effort.MEDIUM
+        assert app.query_one("#slashmenu").display is False
+
+
+@pytest.mark.asyncio
+async def test_app_slash_escape_dismisses_menu():
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/"
+        await pilot.pause()
+        assert app.query_one("#slashmenu").display is True
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.query_one("#slashmenu").display is False
+
+
+@pytest.mark.asyncio
+async def test_app_slash_tab_completes_arg_command_to_value_picker():
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/ef"
+        await pilot.pause()
+        await pilot.press("tab")
+        await pilot.pause()
+        prompt = app.query_one("#prompt")
+        menu = app.query_one("#slashmenu")
+        rendered = str(menu.render())
+        assert prompt.value == "/effort "
+        assert menu.display is True
+        assert "low" in rendered
+        assert "medium" in rendered
+        assert "high" in rendered
+
+
+@pytest.mark.asyncio
 async def test_app_runs_a_turn_through_orchestrator():
     pytest.importorskip("textual")
     orch, provider, memory = _make_orchestrator(function_calling=False)
