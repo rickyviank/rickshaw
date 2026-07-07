@@ -104,6 +104,70 @@ _DEFAULT_HINT = "/help  ·  esc interrupt  ·  ^c quit"
 _USER_MARK = "[#d98a3d]\u203a[/]"  # amber angle-quote before each user message
 _PROMPT_GLYPH = "\u203a"  # in-frame prompt glyph
 
+#: Fixed vocabulary of status-bar segments (PRD D7/D9; shared J6/J8 convention).
+_STATUS_SEGMENTS = ("provider", "model", "effort", "context", "tokens", "price")
+#: Placeholder rendered for any segment whose data is missing (C8, PRD J7).
+_MISSING_SEGMENT = "\u2014"  # em dash
+
+
+def _status_segment_value(
+    name: str,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    model_info: object | None = None,
+    context_tokens: int = 0,
+    session_tokens: int | None = 0,
+    session_cost: float | None = None,
+    warnings: list[str] | None = None,
+) -> str:
+    """Compute a single status-bar segment's display value.
+
+    Returns the em-dash placeholder (``\u2014``) for any segment whose data is
+    missing or unavailable, and never raises (C8). ``context`` needs the active
+    model's ``context_window`` (from ``rickshaw_ai`` ``ModelInfo``); ``price``
+    needs its ``pricing`` defaults. When *warnings* is a list, a short
+    human-readable reason is appended (de-duplicated) for each missing-metadata
+    segment so callers can surface a themed warning (PRD J7 step 2).
+
+    Shared by the status-bar journeys (J6/J8); J7 owns the missing-data path.
+    """
+
+    def _warn(msg: str) -> None:
+        if warnings is not None and msg not in warnings:
+            warnings.append(msg)
+
+    if name == "provider":
+        return provider or _MISSING_SEGMENT
+    if name == "model":
+        return model or _MISSING_SEGMENT
+    if name == "effort":
+        return effort or _MISSING_SEGMENT
+    if name == "context":
+        window = getattr(model_info, "context_window", 0) or 0
+        if window <= 0:
+            _warn("context window unknown for the active model")
+            return _MISSING_SEGMENT
+        pct = round(100 * max(context_tokens, 0) / window)
+        return f"{pct}%"
+    if name == "tokens":
+        if session_tokens is None:
+            return _MISSING_SEGMENT
+        return f"{session_tokens} tok"
+    if name == "price":
+        pricing = getattr(model_info, "pricing", None)
+        in_rate = getattr(pricing, "input", 0.0) or 0.0
+        out_rate = getattr(pricing, "output", 0.0) or 0.0
+        if in_rate <= 0 and out_rate <= 0:
+            _warn("pricing unknown for the active model")
+            return _MISSING_SEGMENT
+        return f"${(session_cost or 0.0):.4f}"
+    # Unknown segment name — ignore with a warning (PRD D9/J8).
+    _warn(f"unknown status-bar segment: {name!r}")
+    return _MISSING_SEGMENT
+
+
 _TEXTUAL_MISSING_MSG = (
     "The Rickshaw terminal UI requires Textual, which is not installed.\n"
     "Install it with:\n\n"
@@ -330,28 +394,28 @@ def make_app(
         # Near-monochrome with a single amber accent; hairline rules separate
         # turns. Chrome is intentionally almost invisible.
         CSS = """
-        $rk-bg: #0f1113;
-        $rk-surface: #16181b;
-        $rk-border: #2a2f36;
-        $rk-text: #e6e8ea;
-        $rk-meta: #8b929c;
-        $rk-accent: #e0a86b;
-        $rk-assistant: #7fb0c9;
-        $rk-warn: #d98a3d;
-        $rk-error: #d16a5a;
-        $rk-success: #7fae7f;
+          $rk-bg: #0f1113;
+          $rk-surface: #16181b;
+          $rk-border: #2a2f36;
+          $rk-text: #e6e8ea;
+          $rk-meta: #8b929c;
+          $rk-accent: #e0a86b;
+          $rk-assistant: #7fb0c9;
+          $rk-warn: #d98a3d;
+          $rk-error: #d16a5a;
+          $rk-success: #7fae7f;
 
-        Screen { layout: vertical; background: $rk-bg; }
-        #welcome {
-            height: auto;
-            width: 1fr;
-            background: $rk-surface;
-            color: $rk-text;
-            border: round $rk-border;
-            padding: 0 2;
-            margin: 0 0 1 0;
-        }
-        #welcome.compact { padding: 0 1; }
+          Screen { layout: vertical; background: $rk-bg; }
+          #welcome {
+              height: auto;
+              width: 1fr;
+              background: $rk-surface;
+              color: $rk-text;
+              border: round $rk-border;
+              padding: 0 2;
+              margin: 0 0 1 0;
+          }
+          #welcome.compact { padding: 0 1; }
         #transcript {
             height: 1fr;
             padding: 1 3;
@@ -367,14 +431,39 @@ def make_app(
             padding: 0;
             background: transparent;
         }
-        #transcript > Rule { color: $rk-border; margin: 0 0 1 0; }
-        .u { color: $rk-text; }
-        .a { color: $rk-meta; }
-        .meta { color: $rk-meta; }
-        .warn { color: $rk-warn; }
+          #transcript > Rule { color: $rk-border; margin: 0 0 1 0; }
+          .u { color: $rk-text; }
+          .a { color: $rk-meta; }
+          .meta { color: $rk-meta; }
+          .warn { color: $rk-warn; }
         .degraded-banner {
-            color: #1a1a1a;
-            background: $rk-error;
+          .degraded-banner {
+              color: #1a1a1a;
+              background: $rk-error;
+              text-style: bold;
+              padding: 0 1;
+          }
+          #hint { height: 1; color: #3a3f47; padding: 0 3 1 3; }
+          #prompt-box {
+              height: auto;
+              max-height: 12;
+              margin: 0 3 1 3;
+          }
+          #prompt {
+              height: auto;
+              max-height: 12;
+              background: $rk-surface;
+              border: round $rk-border;
+              color: $rk-text;
+          }
+          #statusbar {
+              dock: bottom;
+              height: 1;
+              background: $rk-surface;
+              color: $rk-meta;
+              padding: 0 3;
+          }
+          
             text-style: bold;
             padding: 0 1;
         }
@@ -633,21 +722,19 @@ def make_app(
             return f"~${self._session_cost:.4f}"
 
         def _status_segment(self, name: str) -> str:
-            if name == "provider":
-                return self.provider.name if self.provider else "—"
-            if name == "model":
-                if self.provider is None:
-                    return "—"
-                return getattr(self.provider, "_model", "") or self.provider.name
-            if name == "effort":
-                return self.orchestrator.effort.value
-            if name == "context":
-                return self._context_segment()
-            if name == "tokens":
-                return f"{self._session_tokens} tok"
-            if name == "price":
-                return self._price_segment()
-            return "—"
+            info = self._active_model_info()
+            return _status_segment_value(
+                name,
+                provider=self.provider.name if self.provider else None,
+                model=getattr(self.provider, "_model", "") or (
+                    self.provider.name if self.provider else None
+                ),
+                effort=getattr(self.orchestrator.effort, "value", None),
+                model_info=info,
+                context_tokens=self._last_ctx_tokens,
+                session_tokens=self._session_tokens,
+                session_cost=self._session_cost,
+            )
 
         def _update_status_bar(self, width: int | None = None) -> None:
             try:
@@ -687,6 +774,14 @@ def make_app(
                 welcome.add_class("compact")
             else:
                 welcome.remove_class("compact")
+
+        def _warn_missing_metadata(self, model_info: object | None) -> list[str]:
+            warnings: list[str] = []
+            for name in ("context", "price"):
+                _status_segment_value(name, model_info=model_info, warnings=warnings)
+            for msg in warnings:
+                self._write(f"⚠ {msg}", "warn")
+            return warnings
         # ---- input handling --------------------------------------------
 
         def on_prompt_area_submitted(self, event: "PromptArea.Submitted") -> None:
