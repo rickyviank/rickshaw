@@ -343,6 +343,115 @@ async def test_app_runs_a_turn_through_orchestrator():
 
 
 @pytest.mark.asyncio
+async def test_prompt_newline_via_ctrl_j():
+    pytest.importorskip("textual")
+    orch, provider, memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt")
+        prompt.focus()
+        await pilot.press("f", "o", "o")
+        await pilot.press("ctrl+j")
+        await pilot.press("b", "a", "r")
+        await pilot.pause()
+
+        assert app.query_one("#prompt").text == "foo\nbar"
+        assert not any("Hello from fake" in r.text for r in memory.store.all_records())
+
+
+@pytest.mark.asyncio
+async def test_prompt_newline_via_shift_enter():
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt")
+        prompt.focus()
+        await pilot.press("f", "o", "o")
+        await pilot.press("shift+enter")
+        await pilot.press("b", "a", "r")
+        await pilot.pause()
+
+        assert app.query_one("#prompt").text == "foo\nbar"
+
+
+@pytest.mark.asyncio
+async def test_prompt_enter_submits_and_clears():
+    pytest.importorskip("textual")
+    orch, provider, memory = _make_orchestrator(function_calling=False)
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt")
+        prompt.focus()
+        await pilot.press("h", "i")
+        await pilot.press("enter")
+
+        stored = False
+        for _ in range(60):
+            if any("Hello from fake" in r.text for r in memory.store.all_records()):
+                stored = True
+                break
+            await pilot.pause(0.05)
+
+        transcript = app.query_one("#transcript").query("Static")
+        rendered = " ".join(str(w.render()) for w in transcript)
+        assert "hi" in rendered
+        assert stored
+        assert app.query_one("#prompt").text == ""
+
+
+@pytest.mark.asyncio
+async def test_prompt_esc_clears_when_idle():
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    app = tui.make_app(orch, provider, Effort.MEDIUM)
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt")
+        prompt.focus()
+        await pilot.press("x", "y", "z")
+        assert app.query_one("#prompt").text == "xyz"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.query_one("#prompt").text == ""
+
+
+@pytest.mark.asyncio
+async def test_wizard_advances_on_textarea():
+    pytest.importorskip("textual")
+    orch, provider, _memory = _make_orchestrator()
+    cfg = RickshawConfig()
+    cfg.providers["fake"] = ProviderProfile(
+        base_url="", model="fake-model",
+        api_key_env="FAKE_KEY", wire_format="openai",
+    )
+    app = tui.make_app(orch, provider, Effort.MEDIUM, cfg=cfg)
+
+    with patch("rickshaw.tui.build_provider_from_profile", return_value=provider):
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/settings"
+            await pilot.press("enter")
+            await pilot.pause()
+            rendered = " ".join(
+                str(w.render())
+                for w in app.query_one("#transcript").query("Static")
+            )
+            assert "Pick a provider" in rendered
+
+            app.query_one("#prompt").value = "fake"
+            await pilot.press("enter")
+            await pilot.pause()
+            rendered = " ".join(
+                str(w.render())
+                for w in app.query_one("#transcript").query("Static")
+            )
+            assert "Pick a model" in rendered
+
+
+@pytest.mark.asyncio
 async def test_app_effort_command_updates_orchestrator():
     pytest.importorskip("textual")
     orch, provider, _memory = _make_orchestrator()

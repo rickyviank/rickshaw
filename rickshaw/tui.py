@@ -89,6 +89,7 @@ _COMMANDS = {
 
 _DEFAULT_HINT = "/help  ·  esc interrupt  ·  ^c quit"
 _USER_MARK = "[#d98a3d]\u203a[/]"  # amber angle-quote before each user message
+_PROMPT_GLYPH = "\u203a"  # in-frame prompt glyph
 
 _TEXTUAL_MISSING_MSG = (
     "The Rickshaw terminal UI requires Textual, which is not installed.\n"
@@ -248,9 +249,9 @@ def make_app(
         from textual import work
         from textual.app import App, ComposeResult
         from textual.binding import Binding
-        from textual.containers import VerticalScroll
-        from textual.suggester import SuggestFromList
-        from textual.widgets import Input, Markdown, Rule, Static
+        from textual.containers import Horizontal, VerticalScroll
+        from textual.message import Message
+        from textual.widgets import Markdown, Rule, Static, TextArea
     except ImportError as exc:  # pragma: no cover - exercised via message text
         raise SystemExit(_TEXTUAL_MISSING_MSG) from exc
 
@@ -267,6 +268,34 @@ def make_app(
 
     # ---- Main TUI app --------------------------------------------------
 
+    class PromptArea(TextArea):
+        """Multi-line prompt. Enter submits; Shift+Enter / Ctrl+J insert a newline."""
+
+        class Submitted(Message):
+            def __init__(self, value: str) -> None:
+                self.value = value
+                super().__init__()
+
+        @property
+        def value(self) -> str:
+            return self.text
+
+        @value.setter
+        def value(self, new: str) -> None:
+            self.text = new
+
+        def _on_key(self, event) -> None:
+            if event.key == "enter":
+                event.prevent_default()
+                event.stop()
+                self.post_message(self.Submitted(self.text))
+                return
+            if event.key in ("shift+enter", "ctrl+j"):
+                event.prevent_default()
+                event.stop()
+                self.insert("\n")
+                return
+
     class RickshawTUI(App):
         """Textual application driving turns through the Orchestrator."""
 
@@ -276,6 +305,16 @@ def make_app(
         # Near-monochrome with a single amber accent; hairline rules separate
         # turns. Chrome is intentionally almost invisible.
         CSS = """
+        $rk-bg: #0f1113;
+        $rk-surface: #16181b;
+        $rk-border: #2a2f36;
+        $rk-text: #e6e8ea;
+        $rk-meta: #8b929c;
+        $rk-accent: #e0a86b;
+        $rk-assistant: #7fb0c9;
+        $rk-warn: #d98a3d;
+        $rk-error: #d16a5a;
+        $rk-success: #7fae7f;
         Screen { layout: vertical; background: #0e0f11; }
         #head { height: auto; color: #4b5563; padding: 1 3 0 3; }
         #transcript {
@@ -305,11 +344,28 @@ def make_app(
             padding: 0 1;
         }
         #hint { height: 1; color: #3a3f47; padding: 0 3 1 3; }
+        #prompt-box {
+            height: auto;
+            max-height: 12;
+            margin: 0 3 1 3;
+            padding: 0 1;
+            border: round $rk-border;
+            background: transparent;
+        }
+        #prompt-box:focus-within { border: round $rk-accent; }
+        #prompt-glyph {
+            width: 2;
+            height: auto;
+            color: $rk-accent;
+            padding: 0;
+        }
         #prompt {
+            height: auto;
+            max-height: 10;
             border: none;
-            background: #0e0f11;
-            color: #dfe2e7;
-            padding: 0 3;
+            padding: 0;
+            background: transparent;
+            color: $rk-text;
         }
         #prompt:focus { border: none; }
         """
@@ -341,11 +397,9 @@ def make_app(
             yield Static(RICKSHAW_BANNER, id="head")
             yield VerticalScroll(id="transcript")
             yield Static(_DEFAULT_HINT, id="hint")
-            yield Input(
-                placeholder="Message rickshaw…",
-                id="prompt",
-                suggester=SuggestFromList(sorted(_COMMANDS), case_sensitive=False),
-            )
+            with Horizontal(id="prompt-box"):
+                yield Static(_PROMPT_GLYPH, id="prompt-glyph")
+                yield PromptArea(id="prompt")
 
         def on_mount(self) -> None:
             if self.provider is None:
@@ -364,7 +418,7 @@ def make_app(
                         "tools off — recall is harness-driven for this provider.",
                         cls="meta",
                     )
-            self.query_one("#prompt", Input).focus()
+            self.query_one("#prompt", PromptArea).focus()
 
         # ---- on-launch provider picker ---------------------------------
 
@@ -417,9 +471,9 @@ def make_app(
 
         # ---- input handling --------------------------------------------
 
-        def on_input_submitted(self, event: Input.Submitted) -> None:
+        def on_prompt_area_submitted(self, event: "PromptArea.Submitted") -> None:
             value = event.value.strip()
-            event.input.value = ""
+            self.query_one("#prompt", PromptArea).text = ""
             # Wizard intercepts all input while active.
             if self._login_state is not None:
                 self._login_step(value)
@@ -1144,7 +1198,7 @@ def make_app(
             self._write(f"{_USER_MARK} {text}", "u")
             self._begin_assistant()
             self._set_hint("thinking…  ·  esc to interrupt")
-            self.query_one("#prompt", Input).disabled = True
+            self.query_one("#prompt", PromptArea).disabled = True
             self._run_turn(text)
 
         @work(thread=True, exclusive=True, group="turn")
@@ -1196,7 +1250,7 @@ def make_app(
             self._turn_active = False
             self._current_md = None
             self._set_hint(_DEFAULT_HINT)
-            prompt = self.query_one("#prompt", Input)
+            prompt = self.query_one("#prompt", PromptArea)
             prompt.disabled = False
             prompt.focus()
 
@@ -1218,11 +1272,14 @@ def make_app(
                 self._write("(cancelled)", "warn")
                 self._set_hint(_DEFAULT_HINT)
                 return
-            if not self._turn_active:
+            if self._turn_active:
+                self.workers.cancel_group(self, "turn")
+                self._write("(interrupted)", "warn")
+                self._finish_turn()
                 return
-            self.workers.cancel_group(self, "turn")
-            self._write("(interrupted)", "warn")
-            self._finish_turn()
+            prompt = self.query_one("#prompt", PromptArea)
+            if prompt.text:
+                prompt.text = ""
 
         def action_clear(self) -> None:
             self.query_one("#transcript", VerticalScroll).remove_children()
