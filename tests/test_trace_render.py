@@ -327,7 +327,8 @@ def test_terminal_height_no_cap():
     answer = [line for line in view.lines if line.label == "[answer]"][0]
     assert not answer.is_capped
     assert "lines)" not in answer.summary
-    assert short_text in answer.summary
+    assert short_text in answer.content
+    assert "Δ" in answer.summary
 
 
 def test_empty_and_partial_handling():

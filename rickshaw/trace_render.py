@@ -504,7 +504,7 @@ def _delta_block_from_content(
         summary = f"{header}\n{preview}\n… (+{len(lines) - cap_lines} lines)"
         is_capped = True
     else:
-        summary = f"{header}\n{content}"
+        summary = header
         is_capped = False
 
     return _line(

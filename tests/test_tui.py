@@ -2596,7 +2596,11 @@ async def test_trace_block_appears_after_turn():
         # Expanded details contain the grouped answer block.
         app.action_toggle_trace()
         await pilot.pause()
-        line_texts = "\n".join(str(line.render()) for line in trace_blocks[0]._line_widgets)
+        line_texts = "\n".join(
+            str(line._summary_widget.render())
+            for line in trace_blocks[0]._line_widgets
+            if line._summary_widget is not None
+        )
         assert "answer" in line_texts.lower()
         answer_content = "\n".join(
             str(line._content_widget.render())
@@ -2666,7 +2670,11 @@ async def test_ctrl_o_expands_and_collapses_trace_block():
         assert trace.details.display is True
         # Details are rendered as a list of per-line widgets.
         assert len(trace._line_widgets) > 0
-        line_texts = "\n".join(str(line.render()) for line in trace._line_widgets)
+        line_texts = "\n".join(
+            str(line._summary_widget.render())
+            for line in trace._line_widgets
+            if line._summary_widget is not None
+        )
         assert "answer" in line_texts.lower()
         answer_content = "\n".join(
             str(line._content_widget.render())
@@ -2790,17 +2798,17 @@ async def test_trace_r_raw_toggle():
             line.focus()
             await pilot.pause()
 
-            rendered = str(line.render())
+            rendered = str(line._summary_widget.render())
             assert "recall(query)" in rendered
 
             await pilot.press("r")
             await pilot.pause()
-            rendered = str(line.render())
+            rendered = str(line._summary_widget.render())
             assert '"type": "tool_call_done"' in rendered
 
             await pilot.press("r")
             await pilot.pause()
-            rendered = str(line.render())
+            rendered = str(line._summary_widget.render())
             assert "recall(query)" in rendered
 
 
@@ -2902,7 +2910,11 @@ async def test_trace_grouped_answer_and_thinking():
             trace = app.query_one(".trace-block")
             app.action_toggle_trace()
             await pilot.pause()
-            line_texts = "\n".join(str(line.render()) for line in trace._line_widgets)
+            line_texts = "\n".join(
+                str(line._summary_widget.render())
+                for line in trace._line_widgets
+                if line._summary_widget is not None
+            )
             assert "thinking" in line_texts.lower()
             assert "answer" in line_texts.lower()
             content_text = "\n".join(

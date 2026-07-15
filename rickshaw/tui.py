@@ -487,7 +487,7 @@ def make_app(
                 self.insert("\n")
                 return
 
-    class TraceLineWidget(Static):
+    class TraceLineWidget(Vertical):
         """A single focusable line inside an expanded trace block."""
 
         can_focus = True
@@ -499,19 +499,22 @@ def make_app(
             index: int,
             max_content_height: int,
         ) -> None:
-            super().__init__("", classes="trace-line", markup=True)
+            super().__init__(classes="trace-line")
             self.trace_block = trace_block
             self.line = line
             self.index = index
             self.max_content_height = max_content_height
+            self._summary_widget: Static | None = None
             self._content_widget: Static | None = None
-            self._expanded = (
-                line.content is not None
-                and not line.is_capped
-                and line.expandable
-            )
+            self._expanded = line.content is not None and not line.is_capped
+
+        def compose(self) -> ComposeResult:
+            from rich.markup import escape
+
+            yield Static(self._line_text(), classes="trace-line-summary", markup=True)
 
         def on_mount(self) -> None:
+            self._summary_widget = self.query_one(".trace-line-summary", Static)
             self._refresh()
 
         def _line_text(self) -> str:
@@ -542,52 +545,47 @@ def make_app(
         def _ensure_content_widget(self) -> None:
             if self._content_widget is not None:
                 return
-            from rich.markup import escape
-
             if self.trace_block._raw_mode:
-                text = self.line.raw_json or ""
-                classes = "trace-content trace-raw"
-            elif self.line.content is not None:
+                return
+            if self.line.content is not None:
                 text = self.line.content
                 classes = "trace-content"
-            else:
-                text = self.line.raw_json or ""
+            elif self.line.raw_json:
+                text = self.line.raw_json
                 classes = "trace-content trace-raw"
+            else:
+                return
             self._content_widget = Static(
                 text, markup=False, classes=classes
             )
-            if (
-                self.line.is_capped
-                and self.line.content is not None
-                and not self.trace_block._raw_mode
-            ):
+            if self.line.is_capped and self.line.content is not None:
                 self._content_widget.styles.max_height = self.max_content_height
                 self._content_widget.styles.overflow_y = "scroll"
             self.mount(self._content_widget)
             self._content_widget.display = False
 
         def _refresh(self) -> None:
-            if self._expanded:
+            if self._summary_widget is not None:
+                self._summary_widget.update(self._line_text())
+            if self._expanded and not self.trace_block._raw_mode:
                 self._ensure_content_widget()
-            if self._content_widget is not None:
-                self._content_widget.display = self._expanded
-            self.update(self._line_text())
+                if self._content_widget is not None:
+                    self._content_widget.display = True
+            elif self._content_widget is not None:
+                self._content_widget.display = False
 
         def toggle_expand(self) -> None:
-            if self.trace_block._raw_mode:
+            if self.trace_block._raw_mode or not self.line.expandable:
                 return
             self._expanded = not self._expanded
             self._refresh()
 
         def set_raw_mode(self, raw_mode: bool) -> None:
-            if raw_mode:
-                self._expanded = False
-            else:
-                self._expanded = (
-                    self.line.content is not None
-                    and not self.line.is_capped
-                    and self.line.expandable
-                )
+            self._expanded = (
+                not raw_mode
+                and self.line.content is not None
+                and not self.line.is_capped
+            )
             if self._content_widget is not None:
                 self._content_widget.remove()
                 self._content_widget = None
@@ -727,13 +725,17 @@ def make_app(
 
         def focus_first_line(self) -> None:
             if self._line_widgets:
-                self._line_widgets[0].focus()
+                line = self._line_widgets[0]
+                line.focus(scroll_visible=False)
+                line.scroll_visible(animate=False, immediate=True)
 
         def focus_line(self, index: int) -> None:
             if not self._line_widgets:
                 return
             index = max(0, min(index, len(self._line_widgets) - 1))
-            self._line_widgets[index].focus()
+            line = self._line_widgets[index]
+            line.focus(scroll_visible=False)
+            line.scroll_visible(animate=False, immediate=True)
 
         def focus_prompt(self) -> None:
             try:
@@ -878,8 +880,9 @@ def make_app(
           }
           .trace-line { height: auto; color: $rk-text; }
           .trace-line:focus { background: $rk-border; }
+          .trace-line-summary { height: auto; width: 1fr; }
           .trace-header { color: $rk-meta; height: auto; }
-          .trace-content { height: auto; color: $rk-text; }
+          .trace-content { height: auto; width: 1fr; color: $rk-text; }
           .trace-raw { color: $rk-meta; }
           .trace-context { color: $rk-assistant; }
           .trace-tool { color: $rk-accent; }
@@ -2689,6 +2692,9 @@ def make_app(
             trace = self._turns[self._selected_turn_index]["trace"]
             if not trace._expanded:
                 trace.expand()
+            self.call_after_refresh(self._finish_focus_trace, trace)
+
+        def _finish_focus_trace(self, trace: "TraceBlock") -> None:
             trace.focus_first_line()
             self._update_trace_hint()
 
