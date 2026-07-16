@@ -100,8 +100,6 @@ _COMMANDS = {
     "/quit": "Exit.",
     "/exit": "Exit.",
 }
-_ARG_COMMANDS: set[str] = set()
-_EFFORT_VALUES = ["low", "medium", "high"]
 
 STATUS_BAR_VOCABULARY = ("provider", "model", "effort", "context", "tokens", "price")
 STATUS_BAR_DEFAULT_SEGMENTS = [
@@ -995,10 +993,8 @@ def make_app(
             self._ctx_window_warned = False
             self._last_usage = None
             self._menu_open = False
-            self._menu_mode = "command"
             self._menu_items: list[tuple[str, str]] = []
             self._menu_index = 0
-            self._menu_arg_cmd = ""
 
         # ---- layout -----------------------------------------------------
 
@@ -1473,10 +1469,7 @@ def make_app(
             for idx, (value, desc) in enumerate(items):
                 value = escape(value)
                 desc = escape(desc)
-                if self._menu_mode == "command":
-                    body = f"{value:<10} {desc}"
-                else:
-                    body = value
+                body = f"{value:<10} {desc}"
                 if idx == self._menu_index:
                     lines.append(f"[#e0a86b]›[/] [reverse #e0a86b]{body}[/]")
                 else:
@@ -1485,14 +1478,10 @@ def make_app(
 
         def _open_menu(
             self,
-            mode: str,
             items: list[tuple[str, str]],
-            arg_cmd: str = "",
         ) -> None:
             self._menu_open = True
-            self._menu_mode = mode
             self._menu_items = items
-            self._menu_arg_cmd = arg_cmd
             if self._menu_items:
                 self._menu_index = min(self._menu_index, len(self._menu_items) - 1)
             else:
@@ -1503,10 +1492,8 @@ def make_app(
 
         def _close_menu(self) -> None:
             self._menu_open = False
-            self._menu_mode = "command"
             self._menu_items = []
             self._menu_index = 0
-            self._menu_arg_cmd = ""
             menu = self.query_one("#slashmenu", Static)
             menu.update("")
             menu.display = False
@@ -1522,17 +1509,6 @@ def make_app(
             if not self._menu_open or not self._menu_items:
                 return False
 
-            if self._menu_mode == "value":
-                arg_cmd = self._menu_arg_cmd
-                sel = self._menu_items[self._menu_index][0]
-                self.query_one("#prompt", PromptArea).text = ""
-                self._close_menu()
-                if arg_cmd == "/effort":
-                    self._cmd_effort(sel)
-                elif arg_cmd == "/model":
-                    self._cmd_model(sel)
-                return True
-
             typed = self.query_one("#prompt", PromptArea).text.strip().lower()
             exact = typed in _COMMANDS
             if via_enter and exact:
@@ -1540,11 +1516,6 @@ def make_app(
                 return False
 
             cmd = self._menu_items[self._menu_index][0]
-            if cmd in _ARG_COMMANDS:
-                self.query_one("#prompt", PromptArea).text = f"{cmd} "
-                self._close_menu()
-                return True
-
             self.query_one("#prompt", PromptArea).text = ""
             self._close_menu()
             self._handle_command(cmd)
@@ -1565,31 +1536,6 @@ def make_app(
                 return
 
             if " " in text:
-                cmd, _, rest = text.partition(" ")
-                cmd = cmd.lower()
-                if cmd in _ARG_COMMANDS:
-                    if cmd == "/effort":
-                        filter_text = rest.strip().lower()
-                        items = [
-                            (v, "") for v in _EFFORT_VALUES if v.startswith(filter_text)
-                        ]
-                    else:
-                        if self.provider is None:
-                            self._close_menu()
-                            return
-                        try:
-                            models = self.provider.available_models()
-                        except Exception:
-                            self._close_menu()
-                            return
-                        filter_text = rest.strip()
-                        items = [(m, "") for m in models if m.startswith(filter_text)]
-                    if not items:
-                        self._close_menu()
-                        return
-                    self._menu_index = 0
-                    self._open_menu("value", items, arg_cmd=cmd)
-                    return
                 self._close_menu()
                 return
 
@@ -1602,7 +1548,7 @@ def make_app(
                 self._close_menu()
                 return
             self._menu_index = 0
-            self._open_menu("command", items)
+            self._open_menu(items)
 
         def on_text_area_changed(self, event: TextArea.Changed) -> None:
             if getattr(event.text_area, "id", None) == "prompt":
@@ -1641,9 +1587,6 @@ def make_app(
         def _menu_accept_via_enter(self, typed: str) -> bool:
             if not self._menu_open:
                 return False
-            if self._menu_mode == "value":
-                return self._menu_accept(via_enter=True)
-
             if typed.strip().lower() in _COMMANDS:
                 self._close_menu()
                 return False
